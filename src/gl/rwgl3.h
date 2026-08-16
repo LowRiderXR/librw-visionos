@@ -1,6 +1,8 @@
 #ifdef RW_GL3
 #include "glad/glad.h"
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+// TODO(visionos): no window-system headers; the GL context is provided by ANGLE from outside librw.
+#elif defined(LIBRW_SDL2)
 #include <SDL.h>
 #else
 #include <GLFW/glfw3.h>
@@ -12,7 +14,12 @@ namespace rw {
 #ifdef RW_GL3
 struct EngineOpenParams
 {
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+	// TODO(visionos): opaque, externally-supplied GL context/handle from ANGLE.
+	// librw neither creates nor owns a window here, so this is a plain void*
+	// input rather than a write-back GLFWwindow**/SDL_Window**.
+	void *window;
+#elif defined(LIBRW_SDL2)
 	SDL_Window **window;
 	bool32 fullscreen;
 #else

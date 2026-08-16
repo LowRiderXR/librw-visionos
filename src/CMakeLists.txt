@@ -162,6 +162,10 @@ if(LIBRW_PLATFORM_GL3)
             PUBLIC
                 SDL2::SDL2
         )
+    elseif (LIBRW_GL3_GFXLIB STREQUAL "VISIONOS")
+        # visionOS: the GL context is provided by ANGLE from outside librw, so
+        # there is no GLFW/SDL windowing library to find or link here.
+        target_compile_definitions(librw PUBLIC LIBRW_VISIONOS)
     endif()
 
     set(OpenGL_GL_PREFERENCE GLVND)

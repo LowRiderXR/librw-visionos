@@ -1243,7 +1243,11 @@ getFramebufferRect(Raster *frameBuffer)
 	Rect r;
 	Raster *fb = frameBuffer->parent;
 	if(fb->type == Raster::CAMERA){
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+		// TODO(visionos): framebuffer size comes from the external ANGLE/Metal target; use the stub mode for now.
+		r.w = glGlobals.modes[glGlobals.currentMode].mode.width;
+		r.h = glGlobals.modes[glGlobals.currentMode].mode.height;
+#elif defined(LIBRW_SDL2)
 		SDL_GetWindowSize(glGlobals.window, &r.w, &r.h);
 #else
 		glfwGetFramebufferSize(glGlobals.window, &r.w, &r.h);
@@ -1405,7 +1409,10 @@ showRaster(Raster *raster, uint32 flags)
 //	glViewport(raster->offsetX, raster->offsetY,
 //		raster->width, raster->height);
 
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+	// TODO(visionos): no SwapBuffers; the GL result is blitted to a Metal texture outside librw.
+	(void)flags;
+#elif defined(LIBRW_SDL2)
 	if(flags & Raster::FLIPWAITVSYNCH)
 		SDL_GL_SetSwapInterval(1);
 	else
@@ -1446,7 +1453,70 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 	return 0;
 }
 
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+
+// TODO(visionos): hardcoded single video mode until CompositorServices supplies the real size.
+#define VISIONOS_STUB_WIDTH  1920
+#define VISIONOS_STUB_HEIGHT 1080
+
+static void
+makeVideoModeList(void)
+{
+	// TODO(visionos): expose exactly one hardcoded mode; there is no monitor/mode enumeration.
+	rwFree(glGlobals.modes);
+	glGlobals.modes = rwNewT(DisplayMode, 1, ID_DRIVER | MEMDUR_EVENT);
+	glGlobals.modes[0].mode.width = VISIONOS_STUB_WIDTH;
+	glGlobals.modes[0].mode.height = VISIONOS_STUB_HEIGHT;
+	glGlobals.modes[0].depth = 32;
+	glGlobals.modes[0].flags = 0;
+	glGlobals.numModes = 1;
+}
+
+static int
+openVisionOS(EngineOpenParams *openparams)
+{
+	// TODO(visionos): no window/display init; the ANGLE GL context is created and made current outside librw.
+	glGlobals.winWidth = openparams->width;
+	glGlobals.winHeight = openparams->height;
+	glGlobals.winTitle = openparams->windowtitle;
+	glGlobals.window = openparams->window;
+
+	memset(&gl3Caps, 0, sizeof(gl3Caps));
+	// TODO(visionos): ANGLE exposes GLES; assume GLES 3.0 for now.
+	gl3Caps.gles = 1;
+	gl3Caps.glversion = 30;
+
+	makeVideoModeList();
+
+	return 1;
+}
+
+static int
+closeVisionOS(void)
+{
+	// TODO(visionos): nothing to tear down; the context's lifetime is owned externally.
+	return 1;
+}
+
+static int
+startVisionOS(void)
+{
+	// TODO(visionos): context creation happens outside librw (ANGLE); nothing to do here.
+	glGlobals.presentWidth = 0;
+	glGlobals.presentHeight = 0;
+	glGlobals.presentOffX = 0;
+	glGlobals.presentOffY = 0;
+	return 1;
+}
+
+static int
+stopVisionOS(void)
+{
+	// TODO(visionos): context teardown is external; nothing to do.
+	return 1;
+}
+
+#elif defined(LIBRW_SDL2)
 
 static void
 addVideoMode(int displayIndex, int modeIndex)
@@ -1919,7 +1989,83 @@ finalizeOpenGL(void)
 	return 1;
 }
 
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+static int
+deviceSystemVisionOS(DeviceReq req, void *arg, int32 n)
+{
+	VideoMode *rwmode;
+
+	switch(req){
+	case DEVICEOPEN:
+		return openVisionOS((EngineOpenParams*)arg);
+	case DEVICECLOSE:
+		return closeVisionOS();
+
+	case DEVICEINIT:
+		return startVisionOS() && initOpenGL();
+	case DEVICETERM:
+		return termOpenGL() && stopVisionOS();
+
+	case DEVICEFINALIZE:
+		return finalizeOpenGL();
+
+	// TODO(visionos): exactly one subsystem; there is no monitor enumeration.
+	case DEVICEGETNUMSUBSYSTEMS:
+		return 1;
+
+	case DEVICEGETCURRENTSUBSYSTEM:
+		return 0;
+
+	case DEVICESETSUBSYSTEM:
+		if(n >= 1)
+			return 0;
+		return 1;
+
+	case DEVICEGETSUBSSYSTEMINFO:
+		if(n >= 1)
+			return 0;
+		strncpy(((SubSystemInfo*)arg)->name, "visionOS", sizeof(SubSystemInfo::name));
+		return 1;
+
+
+	case DEVICEGETNUMVIDEOMODES:
+		return glGlobals.numModes;
+
+	case DEVICEGETCURRENTVIDEOMODE:
+		return glGlobals.currentMode;
+
+	case DEVICESETVIDEOMODE:
+		if(n >= glGlobals.numModes)
+			return 0;
+		glGlobals.currentMode = n;
+		return 1;
+
+	case DEVICEGETVIDEOMODEINFO:
+		rwmode = (VideoMode*)arg;
+		rwmode->width = glGlobals.modes[n].mode.width;
+		rwmode->height = glGlobals.modes[n].mode.height;
+		rwmode->depth = glGlobals.modes[n].depth;
+		rwmode->flags = glGlobals.modes[n].flags;
+		return 1;
+
+	// TODO(visionos): no multisample query yet; report a single level.
+	case DEVICEGETMAXMULTISAMPLINGLEVELS:
+		return 1;
+	case DEVICEGETMULTISAMPLINGLEVELS:
+		if(glGlobals.numSamples == 0)
+			return 1;
+		return glGlobals.numSamples;
+	case DEVICESETMULTISAMPLINGLEVELS:
+		glGlobals.numSamples = (uint32)n;
+		return 1;
+	default:
+		assert(0 && "not implemented");
+		return 0;
+	}
+	return 1;
+}
+
+#elif defined(LIBRW_SDL2)
 static int
 deviceSystemSDL2(DeviceReq req, void *arg, int32 n)
 {
@@ -2089,7 +2235,9 @@ Device renderdevice = {
 	gl3::im3DRenderPrimitive,
 	gl3::im3DRenderIndexedPrimitive,
 	gl3::im3DEnd,
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+	gl3::deviceSystemVisionOS
+#elif defined(LIBRW_SDL2)
 	gl3::deviceSystemSDL2
 #else
 	gl3::deviceSystemGLFW

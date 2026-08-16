@@ -24,7 +24,10 @@ void im3DEnd(void);
 
 struct DisplayMode
 {
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+	// TODO(visionos): placeholder video mode; real dimensions come from CompositorServices later.
+	struct { int width, height; } mode;
+#elif defined(LIBRW_SDL2)
 	SDL_DisplayMode mode;
 #else
 	GLFWvidmode mode;
@@ -35,7 +38,11 @@ struct DisplayMode
 
 struct GlGlobals
 {
-#ifdef LIBRW_SDL2
+#if defined(LIBRW_VISIONOS)
+	// TODO(visionos): opaque, externally-supplied GL context/handle (ANGLE);
+	// no window, monitors or video-mode enumeration on this platform.
+	void *window;
+#elif defined(LIBRW_SDL2)
 	SDL_Window **pWindow;
 	SDL_Window *window;
 	SDL_GLContext glcontext;
