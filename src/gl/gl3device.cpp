@@ -91,6 +91,15 @@ const char *shaderDecl100es =
 "#define FRAGCOLOR(c) (gl_FragColor = c)\n"
 "precision highp float;\n"
 "precision highp int;\n";
+const char *shaderDecl300es =
+"#version 300 es\n"
+"#define VSIN(index) layout(location = index) in\n"
+"#define VSOUT out\n"
+"#define FSIN in\n"
+"#define FRAGCOLOR(c) (fragColor = c)\n"
+"precision highp float;\n"
+"precision highp int;\n";
+
 const char *shaderDecl310es =
 "#version 310 es\n"
 "#define VSIN(index) layout(location = index) in\n"
@@ -1456,8 +1465,8 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 #if defined(LIBRW_VISIONOS)
 
 // TODO(visionos): hardcoded single video mode until CompositorServices supplies the real size.
-#define VISIONOS_STUB_WIDTH  1920
-#define VISIONOS_STUB_HEIGHT 1080
+#define VISIONOS_STUB_WIDTH  2048
+#define VISIONOS_STUB_HEIGHT 1984
 
 static void
 makeVideoModeList(void)
@@ -1475,11 +1484,13 @@ makeVideoModeList(void)
 static int
 openVisionOS(EngineOpenParams *openparams)
 {
-	// TODO(visionos): no window/display init; the ANGLE GL context is created and made current outside librw.
+	// No window/display init; the ANGLE GL context is created and made current
+	// outside librw. EngineOpenParams.window carries ANGLE's eglGetProcAddress
+	// (a void* here) which startVisionOS() uses to load the GL entry points.
 	glGlobals.winWidth = openparams->width;
 	glGlobals.winHeight = openparams->height;
 	glGlobals.winTitle = openparams->windowtitle;
-	glGlobals.window = openparams->window;
+	glGlobals.window = openparams->window; // = eglGetProcAddress (see startVisionOS)
 
 	memset(&gl3Caps, 0, sizeof(gl3Caps));
 	// TODO(visionos): ANGLE exposes GLES; assume GLES 3.0 for now.
@@ -1501,7 +1512,27 @@ closeVisionOS(void)
 static int
 startVisionOS(void)
 {
-	// TODO(visionos): context creation happens outside librw (ANGLE); nothing to do here.
+	// The GLES context is created and made current by the host (skel/visionos)
+	// via ANGLE; librw does not create it. It only needs the GL entry points,
+	// which we load through the host-provided getProcAddress that arrived in
+	// EngineOpenParams.window and is now cached in glGlobals.window.
+	GLADloadproc getProcAddress = (GLADloadproc)glGlobals.window;
+	if (getProcAddress == nil) {
+		// printf in addition to RWERROR: Engine::start ignores DEVICEINIT's
+		// return, so without this the failure would be swallowed.
+		printf("[vc-gl] FAIL startVisionOS: no getProcAddress via EngineOpenParams.window\n");
+		RWERROR((ERR_GENERAL, "visionOS: no getProcAddress supplied via EngineOpenParams.window"));
+		return 0;
+	}
+
+	if (!gladLoadGLES2Loader(getProcAddress, gl3Caps.glversion)) {
+		printf("[vc-gl] FAIL startVisionOS: gladLoadGLES2Loader failed\n");
+		RWERROR((ERR_GENERAL, "visionOS: gladLoadGLES2Loader failed"));
+		return 0;
+	}
+
+	printf("[vc-gl] OpenGL version: %s\n", glGetString(GL_VERSION));
+
 	glGlobals.presentWidth = 0;
 	glGlobals.presentHeight = 0;
 	glGlobals.presentOffX = 0;
@@ -1860,8 +1891,11 @@ initOpenGL(void)
 	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &gl3Caps.maxAnisotropy);
 
 	if(gl3Caps.gles){
-		if(gl3Caps.glversion >= 30)
+		// TODO(visionos): librw kannte nur 100es und 310es; ANGLE liefert GLES 3.0
+		if(gl3Caps.glversion >= 31)
 			shaderDecl = shaderDecl310es;
+		else if(gl3Caps.glversion >= 30)
+			shaderDecl = shaderDecl300es;
 		else
 			shaderDecl = shaderDecl100es;
 	}else{
