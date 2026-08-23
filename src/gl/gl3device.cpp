@@ -18,6 +18,19 @@
 
 #define PLUGIN_ID 0
 
+#ifdef LIBRW_VISIONOS
+// Provided by the visionOS platform layer (src/skel/visionos). setFrameBuffer()
+// consults these to redirect the surfaceless default framebuffer (fbo 0) to the
+// external EGLImage-backed FBO. Named explicitly so the redirect is intentional.
+extern "C" bool vc_use_external_framebuffer(void);
+extern "C" unsigned int vc_external_framebuffer(void);
+// Attach librw's shared depth renderbuffer to BOTH back-buffer FBOs at once.
+// Needed because the redirect swaps FBOs per frame while librw tracks a single
+// fboMate on the shared CAMERA raster: its "all good" fast path would otherwise
+// leave the other back buffer without a depth attachment.
+extern "C" void vc_attach_depth_renderbuffer(unsigned int rbo);
+#endif
+
 namespace rw {
 namespace gl3 {
 
@@ -1212,8 +1225,27 @@ setFrameBuffer(Camera *cam)
 	Gl3Raster *natzb = PLUGINOFFSET(Gl3Raster, zbuf, nativeRasterOffset);
 	assert(fbuf->type == Raster::CAMERA || fbuf->type == Raster::CAMERATEXTURE);
 
+	uint32 fbo = natfb->fbo;
+#ifdef LIBRW_VISIONOS
+	bool vcRedirected = false;
+	// The GLES context is surfaceless, so the "default framebuffer" (fbo 0) does
+	// not exist. When the main camera (a CAMERA raster, fbo 0) would bind it,
+	// redirect to the platform's external EGLImage-backed FBO instead. Gated on
+	// an explicit named hook so this can't fire for an unrelated fbo==0 and so
+	// the intent is visible. Render-to-texture cameras keep their own fbo.
+	if(fbo == 0 && vc_use_external_framebuffer()){
+		fbo = vc_external_framebuffer();
+		vcRedirected = true;
+		static bool vcLoggedRedirect = false;
+		if(!vcLoggedRedirect){
+			vcLoggedRedirect = true;
+			printf("[vc-fb] redirecting camera default framebuffer (0) -> external FBO %u\n", fbo);
+		}
+	}
+#endif
+
 	// Have to make sure depth buffer is attached to FB's fbo
-	bindFramebuffer(natfb->fbo);
+	bindFramebuffer(fbo);
 	if(zbuf){
 		if(natfb->fboMate == zbuf){
 			// all good
@@ -1225,13 +1257,22 @@ setFrameBuffer(Camera *cam)
 				if(oldfb->fbo){
 					bindFramebuffer(oldfb->fbo);
 					glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-					bindFramebuffer(natfb->fbo);
+					bindFramebuffer(fbo);
 				}
 				oldfb->fboMate = nil;
 			}
 			natfb->fboMate = zbuf;
 			natzb->fboMate = fbuf;
-			if(natfb->fbo){
+			if(fbo){
+#ifdef LIBRW_VISIONOS
+				if(vcRedirected){
+					// Both back buffers share this one CAMERA raster, so librw's
+					// per-raster fboMate bookkeeping only ever tracks one FBO. Attach
+					// the shared depth renderbuffer to BOTH external FBOs here (once);
+					// librw's "all good" fast path is then correct for either buffer.
+					vc_attach_depth_renderbuffer(natzb->texid);
+				}else
+#endif
 				if(gl3Caps.gles)
 					glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, natzb->texid);
 				else
@@ -1240,7 +1281,7 @@ setFrameBuffer(Camera *cam)
 		}
 	}else{
 		// remove z-buffer
-		if(natfb->fboMate && natfb->fbo)
+		if(natfb->fboMate && fbo)
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 		natfb->fboMate = nil;
 	}
