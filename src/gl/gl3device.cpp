@@ -29,6 +29,19 @@ extern "C" unsigned int vc_external_framebuffer(void);
 // fboMate on the shared CAMERA raster: its "all good" fast path would otherwise
 // leave the other back buffer without a depth attachment.
 extern "C" void vc_attach_depth_renderbuffer(unsigned int rbo);
+// Single source for the render-target size (from VISIONOS_SCREEN_* in
+// visionos.cpp). Used for the one hardcoded video mode below.
+extern "C" void vc_screen_size(int *w, int *h);
+// Camera matrix override seam (stereo injection point) + VC_MATRIX_TEST driver.
+// beginUpdate consumes these after computing its own view/proj. Defined in
+// src/skel/visionos/visionos.cpp.
+extern "C" int  vc_matrix_test_mode(void);
+extern "C" void vc_set_view_matrix(const float m[16]);
+extern "C" void vc_set_projection_matrix(const float m[16]);
+extern "C" void vc_set_matrix_override(int active);
+extern "C" int  vc_matrix_override_active(void);
+extern "C" void vc_get_view_matrix(float m[16]);
+extern "C" void vc_get_projection_matrix(float m[16]);
 #endif
 
 namespace rw {
@@ -336,6 +349,25 @@ setGlRenderState(uint32 state, uint32 value)
 	}
 }
 
+#ifdef LIBRW_VISIONOS
+// VC_DOUBLE_RENDER cost probe hooks (toggled from main.cpp's RenderScene hook):
+// mode 3 forces GL_LESS during the 2nd RenderScene so identical-depth fragments
+// all fail the test -- overridden in flushGlRenderState (the single glDepthFunc
+// chokepoint) so librw's LEQUAL can't leak back through its state cache.
+static bool vc_gForceDepthLess = false;
+extern "C" void vc_set_force_depth_less(int on) { vc_gForceDepthLess = on != 0; }
+// mode 2: depth-only clear of the current (redirected) FBO, mask-safe, no RW
+// detour (RwCameraClear mid-frame produced a colour artefact).
+extern "C" void vc_clear_depth(void)
+{
+	glDepthMask(GL_TRUE);
+	glClear(GL_DEPTH_BUFFER_BIT);
+	uint32 mask = rwStateCache.zwrite ? GL_TRUE : GL_FALSE;
+	glDepthMask(mask);
+	oldGlState.depthMask = mask; // keep the low-level cache in sync
+}
+#endif
+
 void
 flushGlRenderState(void)
 {
@@ -355,10 +387,20 @@ flushGlRenderState(void)
 		oldGlState.depthTest = curGlState.depthTest;
 		(oldGlState.depthTest ? glEnable : glDisable)(GL_DEPTH_TEST);
 	}
+#ifdef LIBRW_VISIONOS
+	{
+		uint32 wantDepthFunc = vc_gForceDepthLess ? (uint32)GL_LESS : curGlState.depthFunc;
+		if(oldGlState.depthFunc != wantDepthFunc){
+			oldGlState.depthFunc = wantDepthFunc;
+			glDepthFunc(oldGlState.depthFunc);
+		}
+	}
+#else
 	if(oldGlState.depthFunc != curGlState.depthFunc){
 		oldGlState.depthFunc = curGlState.depthFunc;
 		glDepthFunc(oldGlState.depthFunc);
 	}
+#endif
 	if(oldGlState.depthMask != curGlState.depthMask){
 		oldGlState.depthMask = curGlState.depthMask;
 		glDepthMask(oldGlState.depthMask);
@@ -1247,6 +1289,24 @@ setFrameBuffer(Camera *cam)
 	// Have to make sure depth buffer is attached to FB's fbo
 	bindFramebuffer(fbo);
 	if(zbuf){
+#ifdef LIBRW_VISIONOS
+		// DIAGNOSE: log ONLY when the framebuffer or the zbuffer changes vs the
+		// previous call -- silent while stable, one line at each switch. Capture
+		// the fast-path flag BEFORE the attach (it sets fboMate = zbuf), and read
+		// the ACTUALLY bound depth OBJECT_NAME AFTER, so "should" (zTexid) vs "is"
+		// (boundDepthName) is visible -- decisive when the fast path attaches
+		// nothing.
+		bool vcLogChange = false;
+		bool vcFast = (natfb->fboMate == zbuf);
+		{
+			static uint32 vcPrevFbo = 0xFFFFFFFFu, vcPrevZ = 0xFFFFFFFFu;
+			if(fbo != vcPrevFbo || natzb->texid != vcPrevZ){
+				vcPrevFbo = fbo;
+				vcPrevZ = natzb->texid;
+				vcLogChange = true;
+			}
+		}
+#endif
 		if(natfb->fboMate == zbuf){
 			// all good
 			assert(natzb->fboMate == fbuf);
@@ -1279,6 +1339,19 @@ setFrameBuffer(Camera *cam)
 					glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, natzb->texid, 0);
 			}
 		}
+#ifdef LIBRW_VISIONOS
+		// After the (possibly skipped) attach, read what is REALLY bound as depth
+		// on the now-current fbo. boundDepthName == zTexid -> "is" matches "should";
+		// a mismatch (esp. on the fast path, which attaches nothing) is the bug.
+		if(vcLogChange){
+			GLint boundDepthName = 0;
+			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+				GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &boundDepthName);
+			printf("[vc-fb] setFrameBuffer CHANGE fbo=%u redirected=%d fastPath=%d gles=%d zTexid=%u zdims=%dx%d boundDepthOBJECT_NAME=%d\n",
+			       fbo, vcRedirected ? 1 : 0, vcFast ? 1 : 0, gl3Caps.gles ? 1 : 0,
+			       natzb->texid, zbuf->width, zbuf->height, (int)boundDepthName);
+		}
+#endif
 	}else{
 		// remove z-buffer
 		if(natfb->fboMate && fbo)
@@ -1398,6 +1471,39 @@ beginUpdate(Camera *cam)
 	memcpy(&cam->devProj, &proj, sizeof(RawMatrix));
 	setProjectionMatrix(proj);
 
+#ifdef LIBRW_VISIONOS
+	// Stereo injection point: both matrices are now fully formed (librw
+	// convention) and just uploaded. VC_MATRIX_TEST drives the C-naht seam --
+	// identity feeds these same matrices back (image unchanged), shift adds a
+	// fixed view offset (image moves). Then, if the override is active, re-upload
+	// the seam's matrices so gl3device shows THEM instead of its own. Only the
+	// uniforms change; RwCamera's own frame/frustum (culling, LOD, water,
+	// shadows) are untouched, so game logic and image can differ -- fine for a
+	// small stereo offset, expected for the 0.5 m shift test.
+	{
+		int vcMT = vc_matrix_test_mode();
+		if(vcMT != 0){
+			float tv[16], tp[16];
+			memcpy(tv, view, 16*sizeof(float));
+			memcpy(tp, proj, 16*sizeof(float));
+			if(vcMT == 2)
+				tv[12] += 0.5f; // +0.5 m along view-space X (sign per librw's X-flip; test only needs a visible shift)
+			vc_set_view_matrix(tv);
+			vc_set_projection_matrix(tp);
+			vc_set_matrix_override(1);
+		}
+		if(vc_matrix_override_active()){
+			float ov[16], op[16];
+			vc_get_view_matrix(ov);
+			vc_get_projection_matrix(op);
+			memcpy(&cam->devView, ov, sizeof(RawMatrix));
+			memcpy(&cam->devProj, op, sizeof(RawMatrix));
+			setViewMatrix(ov);
+			setProjectionMatrix(op);
+		}
+	}
+#endif
+
 	if(rwStateCache.fogStart != cam->fogPlane){
 		rwStateCache.fogStart = cam->fogPlane;
 		uniformStateDirty[RWGL_FOGSTART] = true;
@@ -1505,18 +1611,18 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 
 #if defined(LIBRW_VISIONOS)
 
-// TODO(visionos): hardcoded single video mode until CompositorServices supplies the real size.
-#define VISIONOS_STUB_WIDTH  2048
-#define VISIONOS_STUB_HEIGHT 1984
-
 static void
 makeVideoModeList(void)
 {
-	// TODO(visionos): expose exactly one hardcoded mode; there is no monitor/mode enumeration.
+	// TODO(visionos): expose exactly one mode; there is no monitor/mode enumeration.
+	// Size comes from the skel over the C seam (single source; getFramebufferRect
+	// reports this as the CAMERA framebuffer size).
+	int vcW = 0, vcH = 0;
+	vc_screen_size(&vcW, &vcH);
 	rwFree(glGlobals.modes);
 	glGlobals.modes = rwNewT(DisplayMode, 1, ID_DRIVER | MEMDUR_EVENT);
-	glGlobals.modes[0].mode.width = VISIONOS_STUB_WIDTH;
-	glGlobals.modes[0].mode.height = VISIONOS_STUB_HEIGHT;
+	glGlobals.modes[0].mode.width = vcW;
+	glGlobals.modes[0].mode.height = vcH;
 	glGlobals.modes[0].depth = 32;
 	glGlobals.modes[0].flags = 0;
 	glGlobals.numModes = 1;

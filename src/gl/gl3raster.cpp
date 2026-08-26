@@ -239,7 +239,24 @@ rasterCreateZbuffer(Raster *raster)
 		// have to use RBO on GLES!!
 		glGenRenderbuffers(1, &natras->texid);
 		glBindRenderbuffer(GL_RENDERBUFFER, natras->texid);
+#ifdef LIBRW_VISIONOS
+		while(glGetError() != 0) {}   // drain stale errors so storeErr below is attributable to the storage call
+#endif
 		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, raster->width, raster->height);
+#ifdef LIBRW_VISIONOS
+		// DIAGNOSE: this is where the MAIN scene zbuffer (the rbo vcrt attaches to
+		// both FBOs) is actually created -- vcrt only attaches it, never creates
+		// one. Log EVERY creation (no once-guard) with its id and dims so the
+		// 2048x1984 main pass is visible next to any small side rasters, plus the
+		// GL error from the storage call. (The renderbuffer DEPTH_SIZE query is
+		// dropped: ANGLE rejects it with GL_INVALID_ENUM for packed
+		// DEPTH24_STENCIL8; the actual attachment is verified FBO-side instead.)
+		{
+			GLenum storeErr = glGetError();
+			printf("[vc-depth] zbuffer rbo %u created: requested GL_DEPTH24_STENCIL8 %dx%d; storeErr=0x%x\n",
+			       natras->texid, raster->width, raster->height, (unsigned)storeErr);
+		}
+#endif
 	}else{
 		// TODO: set/check width, height, depth, format?
 		natras->internalFormat = GL_DEPTH_STENCIL;
