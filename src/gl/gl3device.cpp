@@ -42,6 +42,7 @@ extern "C" void vc_set_matrix_override(int active);
 extern "C" int  vc_matrix_override_active(void);
 extern "C" void vc_get_view_matrix(float m[16]);
 extern "C" void vc_get_projection_matrix(float m[16]);
+extern "C" int  vc_view_compose_active(void);   // 1 = supplied view is a head offset -> V_final = offset * V_game
 #endif
 
 namespace rw {
@@ -1496,10 +1497,41 @@ beginUpdate(Camera *cam)
 			float ov[16], op[16];
 			vc_get_view_matrix(ov);
 			vc_get_projection_matrix(op);
-			memcpy(&cam->devView, ov, sizeof(RawMatrix));
-			memcpy(&cam->devProj, op, sizeof(RawMatrix));
-			setViewMatrix(ov);
-			setProjectionMatrix(op);
+			float vfinal[16];
+			if(vc_view_compose_active()){
+				// Head-pose offset: V_final = ov * view (column-major). Game view
+				// (culling/LOD source) stays intact; the head only adds on top.
+				for(int c = 0; c < 4; c++)
+					for(int r = 0; r < 4; r++)
+						vfinal[c*4+r] = ov[0*4+r]*view[c*4+0] + ov[1*4+r]*view[c*4+1]
+						              + ov[2*4+r]*view[c*4+2] + ov[3*4+r]*view[c*4+3];
+			}else{
+				memcpy(vfinal, ov, 16*sizeof(float)); // replace (matrix self-test)
+			}
+			// Throttled diagnostic: what the compose actually consumes. compose=1
+			// means V_final=ov*view (offset), 0 means replace (camera = ov only).
+			// view t = game camera (should sit at Tommy); ov t = head offset t;
+			// ov row0 (c0,c2) = yaw cos/sin; vfinal t = final camera position.
+			// Isolation switch: VC_HEAD_KEEP_PROJ=1 keeps the game's OWN projection
+			// (proj) and only overrides the view -- to tell a projection bug (pOut)
+			// apart from a view/compose bug when the scene looks wrong at rest.
+			static int vcKeepProj = -1;
+			if(vcKeepProj < 0) vcKeepProj = getenv("VC_HEAD_KEEP_PROJ") ? 1 : 0;
+			float *finalProj = vcKeepProj ? proj : op;
+
+			static int vcHeadGlN = 0;
+			if((vcHeadGlN++ % 120) == 0){
+				Matrix *ltm = cam->getFrame()->getLTM();
+				printf("[vc-head-gl] compose=%d keepProj=%d  ov_yaw[c0=%.3f c2=%.3f]  cam_up=(%.3f %.3f %.3f)  cam_at=(%.3f %.3f %.3f)\n",
+				       vc_view_compose_active(), vcKeepProj,
+				       ov[0], ov[8],
+				       ltm->up.x, ltm->up.y, ltm->up.z,
+				       ltm->at.x, ltm->at.y, ltm->at.z);
+			}
+			memcpy(&cam->devView, vfinal, sizeof(RawMatrix));
+			memcpy(&cam->devProj, finalProj, sizeof(RawMatrix));
+			setViewMatrix(vfinal);
+			setProjectionMatrix(finalProj);
 		}
 	}
 #endif
