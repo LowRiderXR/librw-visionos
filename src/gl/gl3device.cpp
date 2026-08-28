@@ -43,6 +43,10 @@ extern "C" int  vc_matrix_override_active(void);
 extern "C" void vc_get_view_matrix(float m[16]);
 extern "C" void vc_get_projection_matrix(float m[16]);
 extern "C" int  vc_view_compose_active(void);   // 1 = supplied view is a head offset -> V_final = offset * V_game
+// Phase 5.5 stereo target (visionos_angle.mm): lazily create the 2D-array render
+// target and get a slice's GL FBO. The two eye passes below redirect to these.
+extern "C" bool         vcrt_stereo_ensure(void);
+extern "C" unsigned int vc_stereo_eye_fbo(int eye);
 #endif
 
 namespace rw {
@@ -1409,6 +1413,40 @@ setViewport(Raster *frameBuffer)
 	}
 }
 
+#ifdef LIBRW_VISIONOS
+// Is `cam` the MAIN (screen) camera -- the one whose pixels we publish to the
+// visionOS compositor -- rather than a render-to-texture camera (shadow maps,
+// water reflections, motion blur)? This uses the SAME test as the framebuffer
+// redirect in setFrameBuffer(): the main camera targets a CAMERA-type raster
+// whose native fbo is 0 (the surfaceless "default" framebuffer), which we
+// redirect to the external EGLImage FBO. RTT cameras target CAMERATEXTURE
+// rasters with their own non-zero fbo and never match. Named explicitly (not a
+// side effect) so the head-pose injection can be scoped to exactly this camera:
+// injecting the head offset into the RTT cameras would drag shadows, water and
+// blur with the head -- and, once stereo renders two passes, differently per
+// eye (shadows swimming between the eyes).
+// The main camera's actually-uploaded view/proj this frame (librw convention,
+// column-major). Stashed in beginUpdate so the stereo eye passes -- which run
+// OUTSIDE beginUpdate, at the RenderScene hook -- can start from them and add a
+// per-eye offset. Written only for the main camera.
+static float vcMainView[16];
+static float vcMainProj[16];
+
+static bool
+vcIsMainCamera(Camera *cam)
+{
+	if(!vc_use_external_framebuffer())
+		return false;
+	if(cam->frameBuffer == nil)
+		return false;
+	Raster *fbuf = cam->frameBuffer->parent;
+	if(fbuf == nil)
+		return false;
+	Gl3Raster *natfb = PLUGINOFFSET(Gl3Raster, fbuf, nativeRasterOffset);
+	return fbuf->type == Raster::CAMERA && natfb->fbo == 0;
+}
+#endif
+
 static void
 beginUpdate(Camera *cam)
 {
@@ -1481,57 +1519,92 @@ beginUpdate(Camera *cam)
 	// uniforms change; RwCamera's own frame/frustum (culling, LOD, water,
 	// shadows) are untouched, so game logic and image can differ -- fine for a
 	// small stereo offset, expected for the 0.5 m shift test.
+	//
+	// Scoped to the MAIN camera only: beginUpdate runs once per camera per frame
+	// (screen camera + RTT cameras for shadows/water/blur). Injecting the head
+	// offset into the RTT cameras would drag their results with the head, so we
+	// gate on vcIsMainCamera(). The RTT cameras keep their own computed view/proj.
 	{
-		int vcMT = vc_matrix_test_mode();
-		if(vcMT != 0){
-			float tv[16], tp[16];
-			memcpy(tv, view, 16*sizeof(float));
-			memcpy(tp, proj, 16*sizeof(float));
-			if(vcMT == 2)
-				tv[12] += 0.5f; // +0.5 m along view-space X (sign per librw's X-flip; test only needs a visible shift)
-			vc_set_view_matrix(tv);
-			vc_set_projection_matrix(tp);
-			vc_set_matrix_override(1);
-		}
-		if(vc_matrix_override_active()){
-			float ov[16], op[16];
-			vc_get_view_matrix(ov);
-			vc_get_projection_matrix(op);
-			float vfinal[16];
-			if(vc_view_compose_active()){
-				// Head-pose offset: V_final = ov * view (column-major). Game view
-				// (culling/LOD source) stays intact; the head only adds on top.
-				for(int c = 0; c < 4; c++)
-					for(int r = 0; r < 4; r++)
-						vfinal[c*4+r] = ov[0*4+r]*view[c*4+0] + ov[1*4+r]*view[c*4+1]
-						              + ov[2*4+r]*view[c*4+2] + ov[3*4+r]*view[c*4+3];
-			}else{
-				memcpy(vfinal, ov, 16*sizeof(float)); // replace (matrix self-test)
+		bool vcMain = vcIsMainCamera(cam);
+		bool vcInjected = false;
+		if(vcMain){
+			// Stash the mono main matrices for the stereo eye passes. If the
+			// override fires below, these are overwritten with the composed ones.
+			memcpy(vcMainView, view, 16*sizeof(float));
+			memcpy(vcMainProj, proj, 16*sizeof(float));
+			int vcMT = vc_matrix_test_mode();
+			if(vcMT != 0){
+				float tv[16], tp[16];
+				memcpy(tv, view, 16*sizeof(float));
+				memcpy(tp, proj, 16*sizeof(float));
+				if(vcMT == 2)
+					tv[12] += 0.5f; // +0.5 m along view-space X (sign per librw's X-flip; test only needs a visible shift)
+				vc_set_view_matrix(tv);
+				vc_set_projection_matrix(tp);
+				vc_set_matrix_override(1);
 			}
-			// Throttled diagnostic: what the compose actually consumes. compose=1
-			// means V_final=ov*view (offset), 0 means replace (camera = ov only).
-			// view t = game camera (should sit at Tommy); ov t = head offset t;
-			// ov row0 (c0,c2) = yaw cos/sin; vfinal t = final camera position.
-			// Isolation switch: VC_HEAD_KEEP_PROJ=1 keeps the game's OWN projection
-			// (proj) and only overrides the view -- to tell a projection bug (pOut)
-			// apart from a view/compose bug when the scene looks wrong at rest.
-			static int vcKeepProj = -1;
-			if(vcKeepProj < 0) vcKeepProj = getenv("VC_HEAD_KEEP_PROJ") ? 1 : 0;
-			float *finalProj = vcKeepProj ? proj : op;
+			if(vc_matrix_override_active()){
+				float ov[16], op[16];
+				vc_get_view_matrix(ov);
+				vc_get_projection_matrix(op);
+				float vfinal[16];
+				if(vc_view_compose_active()){
+					// Head-pose offset: V_final = ov * view (column-major). Game view
+					// (culling/LOD source) stays intact; the head only adds on top.
+					for(int c = 0; c < 4; c++)
+						for(int r = 0; r < 4; r++)
+							vfinal[c*4+r] = ov[0*4+r]*view[c*4+0] + ov[1*4+r]*view[c*4+1]
+							              + ov[2*4+r]*view[c*4+2] + ov[3*4+r]*view[c*4+3];
+				}else{
+					memcpy(vfinal, ov, 16*sizeof(float)); // replace (matrix self-test)
+				}
+				// Throttled diagnostic: what the compose actually consumes. compose=1
+				// means V_final=ov*view (offset), 0 means replace (camera = ov only).
+				// view t = game camera (should sit at Tommy); ov t = head offset t;
+				// ov row0 (c0,c2) = yaw cos/sin; vfinal t = final camera position.
+				// Isolation switch: VC_HEAD_KEEP_PROJ=1 keeps the game's OWN projection
+				// (proj) and only overrides the view -- to tell a projection bug (pOut)
+				// apart from a view/compose bug when the scene looks wrong at rest.
+				static int vcKeepProj = -1;
+				if(vcKeepProj < 0) vcKeepProj = getenv("VC_HEAD_KEEP_PROJ") ? 1 : 0;
+				float *finalProj = vcKeepProj ? proj : op;
 
-			static int vcHeadGlN = 0;
-			if((vcHeadGlN++ % 120) == 0){
-				Matrix *ltm = cam->getFrame()->getLTM();
-				printf("[vc-head-gl] compose=%d keepProj=%d  ov_yaw[c0=%.3f c2=%.3f]  cam_up=(%.3f %.3f %.3f)  cam_at=(%.3f %.3f %.3f)\n",
-				       vc_view_compose_active(), vcKeepProj,
-				       ov[0], ov[8],
-				       ltm->up.x, ltm->up.y, ltm->up.z,
-				       ltm->at.x, ltm->at.y, ltm->at.z);
+				static int vcHeadGlN = 0;
+				if((vcHeadGlN++ % 120) == 0){
+					Matrix *ltm = cam->getFrame()->getLTM();
+					printf("[vc-head-gl] compose=%d keepProj=%d  ov_yaw[c0=%.3f c2=%.3f]  cam_up=(%.3f %.3f %.3f)  cam_at=(%.3f %.3f %.3f)\n",
+					       vc_view_compose_active(), vcKeepProj,
+					       ov[0], ov[8],
+					       ltm->up.x, ltm->up.y, ltm->up.z,
+					       ltm->at.x, ltm->at.y, ltm->at.z);
+				}
+				memcpy(&cam->devView, vfinal, sizeof(RawMatrix));
+				memcpy(&cam->devProj, finalProj, sizeof(RawMatrix));
+				setViewMatrix(vfinal);
+				setProjectionMatrix(finalProj);
+				// The composed matrices are what the eye passes must offset from.
+				memcpy(vcMainView, vfinal, 16*sizeof(float));
+				memcpy(vcMainProj, finalProj, 16*sizeof(float));
+				vcInjected = true;
 			}
-			memcpy(&cam->devView, vfinal, sizeof(RawMatrix));
-			memcpy(&cam->devProj, finalProj, sizeof(RawMatrix));
-			setViewMatrix(vfinal);
-			setProjectionMatrix(finalProj);
+		}
+
+		// Prove the scoping once per session: count beginUpdate calls and how many
+		// actually got the injection across one full frame (the span between two
+		// consecutive main-camera renders). Expect injected == 1 of N.
+		{
+			static int vcCalls = 0, vcInjN = 0, vcMainSeen = 0;
+			static bool vcLoggedScope = false;
+			vcCalls++;
+			if(vcInjected) vcInjN++;
+			if(vcMain){
+				if(++vcMainSeen >= 2 && !vcLoggedScope){
+					vcLoggedScope = true;
+					printf("[vc-head-scope] beginUpdate calls/frame=%d injected/frame=%d (expect 1 of N)\n",
+					       vcCalls, vcInjN);
+				}
+				vcCalls = 0; vcInjN = 0; // reset for the next inter-main interval
+			}
 		}
 	}
 #endif
@@ -1551,6 +1624,60 @@ beginUpdate(Camera *cam)
 
 	setViewport(cam->frameBuffer);
 }
+
+#ifdef LIBRW_VISIONOS
+// Phase 5.5 stereo eye pass. Called from main.cpp's RenderScene hook (inside the
+// main camera's Begin/End) once per eye, BEFORE re-running RenderScene. Binds
+// the eye's slice FBO (its own depth), clears, and uploads the stashed main
+// matrices with a synthetic per-eye view-space X offset -- enough to prove the
+// two slices differ. (Real per-eye compositor matrices need the Swift side and
+// are the next step.) Deliberately bypasses the vc_external_framebuffer redirect
+// so the cinema path and vcIsMainCamera() are untouched; vc_stereo_restore_main
+// puts the cinema binding back afterwards.
+extern "C" void
+vc_stereo_eye_pass(int eye)
+{
+	if(!vcrt_stereo_ensure())
+		return;
+	unsigned int fbo = vc_stereo_eye_fbo(eye);
+	if(fbo == 0)
+		return;
+	int w = 0, h = 0;
+	vc_screen_size(&w, &h);
+
+	bindFramebuffer(fbo);
+	glViewport(0, 0, w, h);
+	glDepthMask(GL_TRUE);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	// restore the depth-write state librw expects, and keep its cache in sync
+	uint32 zmask = rwStateCache.zwrite ? GL_TRUE : GL_FALSE;
+	glDepthMask(zmask);
+	oldGlState.depthMask = zmask;
+
+	float v[16];
+	memcpy(v, vcMainView, sizeof(v));
+	v[12] += (eye == 0) ? -0.5f : 0.5f;   // ~1 m eye separation in view-space X
+	setViewMatrix(v);
+	setProjectionMatrix(vcMainProj);
+}
+
+// Rebind the cinema back-buffer FBO + viewport and restore the mono main
+// matrices, so the rest of the frame (effects, motion blur, 2D/HUD, publish)
+// continues into the cinema buffer exactly as before. The cinema depth was
+// never touched (the eye passes use their own).
+extern "C" void
+vc_stereo_restore_main(void)
+{
+	unsigned int fbo = vc_external_framebuffer();
+	int w = 0, h = 0;
+	vc_screen_size(&w, &h);
+	bindFramebuffer(fbo);
+	glViewport(0, 0, w, h);
+	setViewMatrix(vcMainView);
+	setProjectionMatrix(vcMainProj);
+}
+#endif
 
 static void
 endUpdate(Camera *cam)
