@@ -47,6 +47,18 @@ extern "C" int  vc_view_compose_active(void);   // 1 = supplied view is a head o
 // target and get a slice's GL FBO. The two eye passes below redirect to these.
 extern "C" bool         vcrt_stereo_ensure(void);
 extern "C" unsigned int vc_stereo_eye_fbo(int eye);
+// Phase 5.6: real per-eye compositor matrices, already in librw convention (LH /
+// +Z / clip depth -1..1), translations in METRES. Mirror of vc_stereo_eye_matrices_t
+// in VCPlatform.h -- the struct layout MUST match. Implemented in VCRendererStub.mm,
+// which is linked only into the visionOS app, so this lives entirely under
+// LIBRW_VISIONOS; the macOS reference build never references it.
+#include <simd/simd.h>
+typedef struct vc_stereo_eye_matrices_t {
+	simd_float4x4 view[2];        // world->eye, librw convention, metres
+	simd_float4x4 projection[2];  // librw clip (REVERSE-Z: near=+1, far=-1) -- see eye pass
+	uint32_t      valid;          // 0 = not populated (cinema / not ready yet)
+} vc_stereo_eye_matrices_t;
+extern "C" bool vc_get_stereo_eye_matrices(vc_stereo_eye_matrices_t *out);
 #endif
 
 namespace rw {
@@ -1431,6 +1443,11 @@ setViewport(Raster *frameBuffer)
 // per-eye offset. Written only for the main camera.
 static float vcMainView[16];
 static float vcMainProj[16];
+// The main camera's near/far (GAME UNITS) this frame, stashed alongside so the
+// eye passes can build a librw-depth projection (the compositor projection is
+// reverse-Z with near/far in METRES -- unusable for the game's depth buffer).
+static float vcMainNear = 1.0f;
+static float vcMainFar  = 1000.0f;
 
 static bool
 vcIsMainCamera(Camera *cam)
@@ -1532,6 +1549,8 @@ beginUpdate(Camera *cam)
 			// override fires below, these are overwritten with the composed ones.
 			memcpy(vcMainView, view, 16*sizeof(float));
 			memcpy(vcMainProj, proj, 16*sizeof(float));
+			vcMainNear = cam->nearPlane;
+			vcMainFar  = cam->farPlane;
 			int vcMT = vc_matrix_test_mode();
 			if(vcMT != 0){
 				float tv[16], tp[16];
@@ -1657,9 +1676,94 @@ vc_stereo_eye_pass(int eye)
 
 	float v[16];
 	memcpy(v, vcMainView, sizeof(v));
-	v[12] += (eye == 0) ? -0.5f : 0.5f;   // ~1 m eye separation in view-space X
-	setViewMatrix(v);
-	setProjectionMatrix(vcMainProj);
+
+	// Switches (read once). VC_STEREO_REAL: use the real compositor matrices
+	// (default 1) vs the synthetic +/-0.5 m fallback, for A/B on device.
+	// VC_STEREO_WORLD_SCALE: metres -> game units for the eye offset (GTA/VC is
+	// ~1 unit per metre; tune on device). VC_STEREO_KEEP_PROJ: keep the GAME
+	// projection even with real views -- isolates "offset wrong" from "FOV wrong".
+	static int   sInit = 0, sReal = 1, sKeepProj = 0, sLogCtr = 0;
+	static float sScale = 1.0f;
+	if(!sInit){
+		sInit = 1;
+		const char *r = getenv("VC_STEREO_REAL");        if(r) sReal = atoi(r);
+		const char *k = getenv("VC_STEREO_KEEP_PROJ");   if(k) sKeepProj = atoi(k);
+		const char *s = getenv("VC_STEREO_WORLD_SCALE"); if(s) sScale = (float)atof(s);
+		printf("[vc-eyes-gl] REAL=%d KEEP_PROJ=%d WORLD_SCALE=%.4f\n", sReal, sKeepProj, sScale);
+	}
+
+	vc_stereo_eye_matrices_t em;
+	bool haveReal = sReal && vc_get_stereo_eye_matrices(&em) && em.valid;
+
+	float p[16];
+	if(haveReal){
+		// VIEW: add ONLY the per-eye offset to the game camera (gamepad-driven),
+		// never the absolute head pose. The two compositor eye views differ ~only
+		// by the IPD; take each eye's offset from their midpoint and translate the
+		// game view by it in view space, scaled to game units.
+		simd_float4 tL = em.view[0].columns[3];
+		simd_float4 tR = em.view[1].columns[3];
+		simd_float4 tM = 0.5f * (tL + tR);
+		simd_float4 te = em.view[eye].columns[3];
+		v[12] += (te.x - tM.x) * sScale;
+		v[13] += (te.y - tM.y) * sScale;
+		v[14] += (te.z - tM.z) * sScale;
+		setViewMatrix(v);
+
+		// PROJECTION: take FOV + per-eye asymmetry (rows 0/1) from the compositor,
+		// but REBUILD depth (rows 2/3) from the game's near/far in game units,
+		// standard-Z. The compositor projection is REVERSE-Z with near/far in
+		// METRES; using it as-is fights librw's depth buffer (GL_LEQUAL, clear 1)
+		// -- exactly the reverse-Z black-screen trap. So we never upload its depth.
+		if(sKeepProj){
+			memcpy(p, vcMainProj, sizeof(p));
+		}else{
+			// SYMMETRIC per-eye projection: compositor FOV (rows 0/1 scale) but NO
+			// off-axis asymmetry (p[8]/p[9] = 0). The canted-display asymmetry does
+			// NOT belong in the slice here: the Swift side shows each slice on a
+			// world-anchored screen projected per eye with computeProjection(), and
+			// THAT provides the convergence. Baking the asymmetry into the slice too
+			// double-counts it -> a fixed shear the eyes can't fuse (measured: even
+			// identical slices diverged until the display path was projected). Depth
+			// (rows 2/3) is REBUILT from the game near/far, standard-Z: the compositor
+			// projection is reverse-Z in metres and would re-trigger the black screen.
+			const float *cp = (const float *)&em.projection[eye];  // column-major
+			memset(p, 0, sizeof(p));
+			p[0]  =  cp[0];    // FOV x
+			p[5]  =  cp[5];    // FOV y
+			float n = vcMainNear, f = vcMainFar, invz = 1.0f / (f - n);
+			p[10] = (f + n) * invz;         // standard-Z (near->-1, far->+1)
+			p[11] = 1.0f;
+			p[14] = -2.0f * n * f * invz;
+			p[15] = 0.0f;
+		}
+		setProjectionMatrix(p);
+	}else{
+		// Fallback (VC_STEREO_REAL=0, or valid=0 in cinema/loading): the old
+		// synthetic +/-0.5 m offset + game projection. Kept for A/B comparison.
+		v[12] += (eye == 0) ? -0.5f : 0.5f;
+		setViewMatrix(v);
+		memcpy(p, vcMainProj, sizeof(p));
+		setProjectionMatrix(p);
+	}
+
+	// Throttled per-eye (BOTH eyes of the SAME frame log consecutively, since eye
+	// 0 and 1 run back-to-back): the view offset actually applied (must be opposite
+	// per eye, ~-/+0.03 in x = the IPD) and the projection. uploaded p[8] is now 0
+	// by design (symmetric slice); raw cp[8] still shows the compositor's -/+0.27
+	// asymmetry that the projected screen -- not the slice -- consumes.
+	static int sDiagFrame = 0;
+	if(eye == 0) sDiagFrame++;
+	if(haveReal && (sDiagFrame % 90) == 0){
+		simd_float4 tL = em.view[0].columns[3];
+		simd_float4 tR = em.view[1].columns[3];
+		simd_float4 tM = 0.5f * (tL + tR);
+		simd_float4 te = em.view[eye].columns[3];
+		const float *cp = (const float *)&em.projection[eye];
+		printf("[vc-eye%d] view-offset=(%.4f,%.4f,%.4f)  uploaded p[8]=%.4f p[9]=%.4f  (raw cp[8]=%.4f cp[9]=%.4f)\n",
+		       eye, te.x - tM.x, te.y - tM.y, te.z - tM.z, p[8], p[9], cp[8], cp[9]);
+	}
+	(void)sLogCtr;
 }
 
 // Rebind the cinema back-buffer FBO + viewport and restore the mono main
