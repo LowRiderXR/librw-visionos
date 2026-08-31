@@ -1689,7 +1689,8 @@ vc_stereo_eye_pass(int eye)
 		const char *r = getenv("VC_STEREO_REAL");        if(r) sReal = atoi(r);
 		const char *k = getenv("VC_STEREO_KEEP_PROJ");   if(k) sKeepProj = atoi(k);
 		const char *s = getenv("VC_STEREO_WORLD_SCALE"); if(s) sScale = (float)atof(s);
-		printf("[vc-eyes-gl] REAL=%d KEEP_PROJ=%d WORLD_SCALE=%.4f\n", sReal, sKeepProj, sScale);
+		printf("[vc-eyes-gl] REAL=%d KEEP_PROJ=%d WORLD_SCALE=%.4f (CANVAS: projected screen)\n",
+		       sReal, sKeepProj, sScale);
 	}
 
 	vc_stereo_eye_matrices_t em;
@@ -1697,10 +1698,11 @@ vc_stereo_eye_pass(int eye)
 
 	float p[16];
 	if(haveReal){
-		// VIEW: add ONLY the per-eye offset to the game camera (gamepad-driven),
-		// never the absolute head pose. The two compositor eye views differ ~only
-		// by the IPD; take each eye's offset from their midpoint and translate the
-		// game view by it in view space, scaled to game units.
+		// Per-eye IPD offset = each eye's view-translation minus their midpoint (so
+		// the absolute room position cancels, leaving only the ~0.03 m half-IPD).
+		// Added to the game view; the CANVAS display quad (projected per eye with
+		// computeProjection(i)) supplies the convergence, so no head rotation is
+		// composed here. (Head look would need the direct-render path, not the blit.)
 		simd_float4 tL = em.view[0].columns[3];
 		simd_float4 tR = em.view[1].columns[3];
 		simd_float4 tM = 0.5f * (tL + tR);
@@ -1718,24 +1720,39 @@ vc_stereo_eye_pass(int eye)
 		if(sKeepProj){
 			memcpy(p, vcMainProj, sizeof(p));
 		}else{
-			// SYMMETRIC per-eye projection: compositor FOV (rows 0/1 scale) but NO
-			// off-axis asymmetry (p[8]/p[9] = 0). The canted-display asymmetry does
-			// NOT belong in the slice here: the Swift side shows each slice on a
-			// world-anchored screen projected per eye with computeProjection(), and
-			// THAT provides the convergence. Baking the asymmetry into the slice too
-			// double-counts it -> a fixed shear the eyes can't fuse (measured: even
-			// identical slices diverged until the display path was projected). Depth
-			// (rows 2/3) is REBUILT from the game near/far, standard-Z: the compositor
-			// projection is reverse-Z in metres and would re-trigger the black screen.
+			// SYMMETRIC per-eye projection: compositor FOV only, NO off-axis
+			// asymmetry, normal X (no p0 flip). PROVEN on device: the compositor
+			// reprojects colorTextures[i] with its OWN off-axis computeProjection(i),
+			// so it EXPECTS symmetric slices -- baking the asymmetry in doubles it
+			// (divergence). And a p0 X-flip inverts the WHOLE X axis (IPD direction
+			// AND head-turn direction), so ANGLE's per-slice X-flip is instead undone
+			// in the display (uv.x flip), not here. Depth (rows 2/3) REBUILT from the
+			// game near/far, standard-Z: the compositor depth is reverse-Z in metres
+			// and would re-trigger the reverse-Z black screen.
 			const float *cp = (const float *)&em.projection[eye];  // column-major
 			memset(p, 0, sizeof(p));
-			p[0]  =  cp[0];    // FOV x
-			p[5]  =  cp[5];    // FOV y
+			p[0]  = cp[0];         // FOV x
+			p[5]  = cp[5];         // FOV y
 			float n = vcMainNear, f = vcMainFar, invz = 1.0f / (f - n);
 			p[10] = (f + n) * invz;         // standard-Z (near->-1, far->+1)
 			p[11] = 1.0f;
 			p[14] = -2.0f * n * f * invz;
 			p[15] = 0.0f;
+		}
+		// Per-eye upload proof, throttled, eyes 0/1 back-to-back. Row 0 is now
+		// symmetric by design: p0 = +compositor FOV x, p8 = p12 = 0 (the compositor
+		// adds the off-axis itself). view.x-off = the IPD offset actually applied
+		// (opposite per eye); the convergence sign is validated on device.
+		{
+			static int sDiagFrame = 0;
+			if(eye == 0) sDiagFrame++;
+			if(sDiagFrame % 90 == 0){
+				simd_float4 te = em.view[eye].columns[3];
+				simd_float4 tM = 0.5f*(em.view[0].columns[3] + em.view[1].columns[3]);
+				const float *cp = (const float *)&em.projection[eye];
+				printf("[vc-eye%d] UPLOAD row0=[p0=%.4f p8=%.4f p12=%.4f]  view.x-off=%.4f  raw cp[p0=%.4f p8=%.4f]\n",
+				       eye, p[0], p[8], p[12], te.x - tM.x, cp[0], cp[8]);
+			}
 		}
 		setProjectionMatrix(p);
 	}else{
@@ -1747,22 +1764,6 @@ vc_stereo_eye_pass(int eye)
 		setProjectionMatrix(p);
 	}
 
-	// Throttled per-eye (BOTH eyes of the SAME frame log consecutively, since eye
-	// 0 and 1 run back-to-back): the view offset actually applied (must be opposite
-	// per eye, ~-/+0.03 in x = the IPD) and the projection. uploaded p[8] is now 0
-	// by design (symmetric slice); raw cp[8] still shows the compositor's -/+0.27
-	// asymmetry that the projected screen -- not the slice -- consumes.
-	static int sDiagFrame = 0;
-	if(eye == 0) sDiagFrame++;
-	if(haveReal && (sDiagFrame % 90) == 0){
-		simd_float4 tL = em.view[0].columns[3];
-		simd_float4 tR = em.view[1].columns[3];
-		simd_float4 tM = 0.5f * (tL + tR);
-		simd_float4 te = em.view[eye].columns[3];
-		const float *cp = (const float *)&em.projection[eye];
-		printf("[vc-eye%d] view-offset=(%.4f,%.4f,%.4f)  uploaded p[8]=%.4f p[9]=%.4f  (raw cp[8]=%.4f cp[9]=%.4f)\n",
-		       eye, te.x - tM.x, te.y - tM.y, te.z - tM.z, p[8], p[9], cp[8], cp[9]);
-	}
 	(void)sLogCtr;
 }
 
