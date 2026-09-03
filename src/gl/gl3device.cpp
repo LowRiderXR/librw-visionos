@@ -1700,9 +1700,11 @@ vc_stereo_eye_pass(int eye)
 	if(haveReal){
 		// Per-eye IPD offset = each eye's view-translation minus their midpoint (so
 		// the absolute room position cancels, leaving only the ~0.03 m half-IPD).
-		// Added to the game view; the CANVAS display quad (projected per eye with
-		// computeProjection(i)) supplies the convergence, so no head rotation is
-		// composed here. (Head look would need the direct-render path, not the blit.)
+		// Added to vcMainView, which beginUpdate has ALREADY composed with the head
+		// pose (V_final = M_head · V_game) when head-compose is active -- so the eye
+		// view here is game-camera + head look + this eye's IPD. Only the IPD is added
+		// in this pass; the head rotation comes from vcMainView, the convergence from
+		// the per-eye display-quad projection.
 		simd_float4 tL = em.view[0].columns[3];
 		simd_float4 tR = em.view[1].columns[3];
 		simd_float4 tM = 0.5f * (tL + tR);
