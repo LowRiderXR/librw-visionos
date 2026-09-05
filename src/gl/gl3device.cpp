@@ -43,6 +43,7 @@ extern "C" int  vc_matrix_override_active(void);
 extern "C" void vc_get_view_matrix(float m[16]);
 extern "C" void vc_get_projection_matrix(float m[16]);
 extern "C" int  vc_view_compose_active(void);   // 1 = supplied view is a head offset -> V_final = offset * V_game
+extern "C" int  vc_render_mode(void);           // 1 = VC_MODE_STEREO (sprite head-view fix scope)
 // Phase 5.5 stereo target (visionos_angle.mm): lazily create the 2D-array render
 // target and get a slice's GL FBO. The two eye passes below redirect to these.
 extern "C" bool         vcrt_stereo_ensure(void);
@@ -1448,6 +1449,13 @@ static float vcMainProj[16];
 // reverse-Z with near/far in METRES -- unusable for the game's depth buffer).
 static float vcMainNear = 1.0f;
 static float vcMainFar  = 1000.0f;
+// The per-eye VIEW + PROJECTION (librw) the last eye pass uploaded (see vc_get_eye_view).
+static float vcEyeView[16];
+static float vcEyeProj[16];
+static int   vcEyeViewValid = 0;
+#define g_vcEyeView vcEyeView
+#define g_vcEyeProj vcEyeProj
+#define g_vcEyeViewValid vcEyeViewValid
 
 static bool
 vcIsMainCamera(Camera *cam)
@@ -1767,12 +1775,45 @@ vc_stereo_eye_pass(int eye)
 	}
 
 	(void)sLogCtr;
+
+	// Stash the eye VIEW (librw convention) this pass uploaded, so the reVC side can
+	// set TheCamera to the same eye camera (fixes CPU-side sky/coronas/lighting that
+	// read TheCamera instead of the GPU uniform). This is the matrix known to render
+	// the world correctly -- the reVC side converts + verifies against it.
+	memcpy(g_vcEyeView, v, sizeof(v));
+	memcpy(g_vcEyeProj, p, sizeof(p));
+	g_vcEyeViewValid = 1;
+}
+
+// The eye VIEW (librw convention, column-major) that the last vc_stereo_eye_pass
+// uploaded. Returns 1 + fills m if valid this session.
+extern "C" int
+vc_get_eye_view(float m[16])
+{
+	if(!g_vcEyeViewValid) return 0;
+	memcpy(m, g_vcEyeView, 16*sizeof(float));
+	return 1;
+}
+
+// The eye PROJECTION (librw clip, column-major) the last eye pass uploaded -- what
+// the GPU world used. Lets the reVC side check CalcScreenCoors' fixed x/z*W mapping
+// against the real slice projection.
+extern "C" int
+vc_get_eye_proj(float m[16])
+{
+	if(!g_vcEyeViewValid) return 0;
+	memcpy(m, g_vcEyeProj, 16*sizeof(float));
+	return 1;
 }
 
 // Rebind the cinema back-buffer FBO + viewport and restore the mono main
-// matrices, so the rest of the frame (effects, motion blur, 2D/HUD, publish)
-// continues into the cinema buffer exactly as before. The cinema depth was
-// never touched (the eye passes use their own).
+// matrices, so the rest of the frame (2D/HUD/menu, publish) continues into the
+// cinema buffer. In stereo the cinema buffer is REPURPOSED as the head-locked
+// HUD layer: the world already went into the eye slices, so we CLEAR the cinema
+// buffer to fully TRANSPARENT (0,0,0,0) here -- wiping the sky drawn earlier by
+// DoRWStuffStartOfFrame_Horizon -- so only the 2D/HUD/menu drawn afterwards
+// remains, over transparency. The eye passes used their own depth; the cinema
+// depth is cleared too so the 2D pass starts clean.
 extern "C" void
 vc_stereo_restore_main(void)
 {
@@ -1781,9 +1822,24 @@ vc_stereo_restore_main(void)
 	vc_screen_size(&w, &h);
 	bindFramebuffer(fbo);
 	glViewport(0, 0, w, h);
+	// Force ALPHA writes on for the clear AND the following 2D pass. Measured: the
+	// clear leaves RGB=0 but alpha=255 (the "transparent" clear did not clear alpha
+	// -> HUD buffer opaque -> premultiplied HUD quad blacks out the world). librw
+	// never touches glColorMask, so the alpha channel must be write-masked by the
+	// ANGLE/EGL default; force it explicitly. Scissor off too, so the clear covers
+	// the whole buffer. Kept on afterwards so the 2D/HUD pass writes coverage alpha.
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glDisable(GL_SCISSOR_TEST);
+	glDepthMask(GL_TRUE);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);   // transparent HUD background
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	uint32 zmask = rwStateCache.zwrite ? GL_TRUE : GL_FALSE;
+	glDepthMask(zmask);
+	oldGlState.depthMask = zmask;
 	setViewMatrix(vcMainView);
 	setProjectionMatrix(vcMainProj);
 }
+
 #endif
 
 static void
