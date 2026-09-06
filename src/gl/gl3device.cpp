@@ -614,6 +614,21 @@ setFilterMode(uint32 stage, int32 filter, int32 maxAniso = 1)
 					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filterConvMap_NoMIP[filter]);
 				}
 				natras->filterMode = filter;
+#ifdef LIBRW_VISIONOS
+				// Measurement (NPC-face bleed): one line per texture the first time its
+				// filter is set (dedup'd by this filterMode!=filter guard). Tells us whether
+				// ped/face textures have mips (numLevels>1 or autogen -> coarse mip bleeds
+				// clothing colour), which min-filter, and the requested aniso. Env-gated,
+				// bounded during a cutscene. VC_TEXLOG=1 to enable.
+				{
+					static int texlog = -1;
+					if(texlog < 0){ const char *s = getenv("VC_TEXLOG"); texlog = s ? atoi(s) : 0; }
+					if(texlog)
+						printf("[vc-tex] %dx%d numLevels=%d autogen=%d filter=%d aniso=%d cap=%.0f\n",
+							raster->width, raster->height, natras->numLevels,
+							(int)natras->autogenMipmap, filter, maxAniso, gl3Caps.maxAnisotropy);
+				}
+#endif
 			}
 			if(natras->maxAnisotropy != maxAniso){
 				setActiveTexture(stage);
@@ -1456,6 +1471,13 @@ static int   vcEyeViewValid = 0;
 #define g_vcEyeView vcEyeView
 #define g_vcEyeProj vcEyeProj
 #define g_vcEyeViewValid vcEyeViewValid
+// Stereo sky clear colour (0..1), set per frame from CTimeCycle by main.cpp. Default
+// black = old behaviour (so nothing changes until the reVC side pushes a colour).
+static float g_vcSkyClear[3] = { 0.0f, 0.0f, 0.0f };
+extern "C" void vc_set_stereo_sky_clear(float r, float g, float b)
+{
+	g_vcSkyClear[0] = r; g_vcSkyClear[1] = g; g_vcSkyClear[2] = b;
+}
 
 static bool
 vcIsMainCamera(Camera *cam)
@@ -1675,7 +1697,10 @@ vc_stereo_eye_pass(int eye)
 	bindFramebuffer(fbo);
 	glViewport(0, 0, w, h);
 	glDepthMask(GL_TRUE);
-	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	// Clear the slice to the SKY colour (set per frame from CTimeCycle) instead of
+	// black, so the sky fills the whole eye FOV as a world-anchored solid -- the
+	// screen-space gradient/horizon band (which head-locked) is skipped in stereo.
+	glClearColor(g_vcSkyClear[0], g_vcSkyClear[1], g_vcSkyClear[2], 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	// restore the depth-write state librw expects, and keep its cache in sync
 	uint32 zmask = rwStateCache.zwrite ? GL_TRUE : GL_FALSE;
@@ -2358,6 +2383,11 @@ initOpenGL(void)
 	gl3Caps.astcSupported = !!GLAD_GL_KHR_texture_compression_astc_ldr;
 
 	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &gl3Caps.maxAnisotropy);
+#ifdef LIBRW_VISIONOS
+	// Measurement (NPC-face bleed / shimmer): does ANGLE-on-Metal honour anisotropic
+	// filtering? cap==1 -> candidate "raise anisotropy" is dead; cap>=16 -> cheapest lever.
+	printf("[vc-tex] maxAnisotropy cap = %.1f\n", gl3Caps.maxAnisotropy);
+#endif
 
 	if(gl3Caps.gles){
 		// TODO(visionos): librw kannte nur 100es und 310es; ANGLE liefert GLES 3.0
