@@ -542,6 +542,22 @@ assert(natras->format == GL_RGBA);
 #endif
 }
 
+#ifdef LIBRW_VISIONOS
+#include <stdlib.h>
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
+#endif
+// VC_MIPMAP (Stufe 1): build mip chains for OPAQUE world textures so distant
+// walls/roads/buildings/vehicles minify trilinearly instead of crawling texel to
+// texel. Default OFF. VC_ANISO raises anisotropy on those same textures (only
+// meaningful once mips exist; capped by the GL cap at render time is not applied
+// here, so keep <=16). Alpha-masked textures are excluded (coverage thinning is
+// Stufe 2) -- hasAlpha==0 is exactly "not alpha-tested" (see setRasterStage).
+static int vcMipmapEnabled(void) { static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP"); v=s?atoi(s):0; } return v; }
+static int vcMipmapAniso(void)   { static int v=-1; if(v<0){ const char*s=getenv("VC_ANISO");  v=s?atoi(s):8; if(v<1)v=1; if(v>16)v=16; } return v; }
+static unsigned long long g_vcMipBytesAdded = 0;
+#endif
+
 void
 rasterUnlock(Raster *raster, int32 level)
 {
@@ -574,6 +590,31 @@ rasterUnlock(Raster *raster, int32 level)
 			}
 			if(level == 0 && natras->autogenMipmap)
 				glGenerateMipmap(GL_TEXTURE_2D);
+#ifdef LIBRW_VISIONOS
+			// VC_MIPMAP Stufe 1: opaque, uncompressed, single-level world textures.
+			// readNativeTexture / image conversion / runtime creates ALL funnel their
+			// texel upload through this unlock, so this one hook covers every path.
+			else if(level == 0 && vcMipmapEnabled() && !natras->hasAlpha &&
+			        !natras->isCompressed && natras->numLevels == 1 &&
+			        (raster->type == Raster::TEXTURE || raster->type == Raster::NORMAL)){
+				int w = raster->width, h = raster->height;
+				int maxDim = w > h ? w : h;
+				int levels = 1; while(maxDim > 1){ levels++; maxDim >>= 1; }
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, levels-1);
+				glGenerateMipmap(GL_TEXTURE_2D);
+				natras->numLevels = levels;   // engages the MIP filter path (setRasterStage/setFilterMode)
+				int aniso = vcMipmapAniso();
+				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)aniso);
+				natras->maxAnisotropy = aniso;   // sync librw's cache so a later setFilterMode won't reset to 1
+				unsigned long long added = (unsigned long long)raster->stride * (unsigned)h / 3ull;  // mip tail ~= base/3
+				g_vcMipBytesAdded += added;
+				static int mipLogged = 0;
+				if(mipLogged < 8 || (mipLogged % 512) == 0)
+					printf("[vc-mip] %dx%d levels=%d aniso=%d (+%llu KB, running total ~%llu MB)\n",
+					       w, h, levels, aniso, added/1024ull, g_vcMipBytesAdded/1000000ull);
+				mipLogged++;
+			}
+#endif
 			bindTexture(prev);
 		}
 		break;

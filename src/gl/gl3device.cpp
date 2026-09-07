@@ -48,6 +48,7 @@ extern "C" int  vc_render_mode(void);           // 1 = VC_MODE_STEREO (sprite he
 // target and get a slice's GL FBO. The two eye passes below redirect to these.
 extern "C" bool         vcrt_stereo_ensure(void);
 extern "C" unsigned int vc_stereo_eye_fbo(int eye);
+extern "C" void         vc_stereo_msaa_resolve_pending(void);   // VC_MSAA: resolve last eye's MSAA into its slice
 // Phase 5.6: real per-eye compositor matrices, already in librw convention (LH /
 // +Z / clip depth -1..1), translations in METRES. Mirror of vc_stereo_eye_matrices_t
 // in VCPlatform.h -- the struct layout MUST match. Implemented in VCRendererStub.mm,
@@ -596,6 +597,23 @@ static GLint addressConvMap[] = {
 	GL_CLAMP_TO_EDGE, GL_CLAMP_TO_BORDER
 };
 
+#ifdef LIBRW_VISIONOS
+static int vcMipmapEnabled(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP"); v=s?atoi(s):0; } return v; }
+static int vcAnisoLevel(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_ANISO"); v=s?atoi(s):8; if(v<1)v=1; if(v>16)v=16; } return v; }
+// Opaque world textures that got a generated mip chain (gl3raster VC_MIPMAP path:
+// numLevels>1, no alpha) still arrive with filter=LINEAR, which maps to GL_LINEAR
+// even in filterConvMap_MIP -> the chain would never be sampled. Upgrade the MIN
+// filter to the trilinear variant so the mips are actually read. Alpha-masked
+// textures are excluded here too (Stufe 2).
+static int vcUpgradeMipFilter(Gl3Raster *natras, int32 filter){
+	if(vcMipmapEnabled() && !natras->hasAlpha && natras->numLevels > 1){
+		if(filter == Texture::LINEAR)  return Texture::LINEARMIPLINEAR;   // trilinear
+		if(filter == Texture::NEAREST) return Texture::MIPNEAREST;        // nearest + mip
+	}
+	return filter;
+}
+#endif
+
 static void
 setFilterMode(uint32 stage, int32 filter, int32 maxAniso = 1)
 {
@@ -604,10 +622,21 @@ setFilterMode(uint32 stage, int32 filter, int32 maxAniso = 1)
 		Raster *raster = rwStateCache.texstage[stage].raster;
 		if(raster){
 			Gl3Raster *natras = PLUGINOFFSET(Gl3Raster, rwStateCache.texstage[stage].raster, nativeRasterOffset);
+			int32 effAniso = maxAniso;
+#ifdef LIBRW_VISIONOS
+			// Opaque mipped world textures run through THIS path and would otherwise
+			// have aniso reset to the incoming maxAniso (=1). Enforce VC_ANISO here.
+			if(vcMipmapEnabled() && !natras->hasAlpha && natras->numLevels > 1 && vcAnisoLevel() > effAniso)
+				effAniso = vcAnisoLevel();
+#endif
 			if(natras->filterMode != filter){
 				setActiveTexture(stage);
 				if(natras->autogenMipmap || natras->numLevels > 1){
+#ifdef LIBRW_VISIONOS
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filterConvMap_MIP[vcUpgradeMipFilter(natras, filter)]);
+#else
 					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filterConvMap_MIP[filter]);
+#endif
 					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filterConvMap_NoMIP[filter]);
 				}else{
 					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filterConvMap_NoMIP[filter]);
@@ -624,16 +653,17 @@ setFilterMode(uint32 stage, int32 filter, int32 maxAniso = 1)
 					static int texlog = -1;
 					if(texlog < 0){ const char *s = getenv("VC_TEXLOG"); texlog = s ? atoi(s) : 0; }
 					if(texlog)
-						printf("[vc-tex] %dx%d numLevels=%d autogen=%d filter=%d aniso=%d cap=%.0f\n",
+						printf("[vc-tex] %dx%d numLevels=%d autogen=%d filter=%d->min=%d aniso=%d(req %d) hasAlpha=%d comp=%d cap=%.0f\n",
 							raster->width, raster->height, natras->numLevels,
-							(int)natras->autogenMipmap, filter, maxAniso, gl3Caps.maxAnisotropy);
+							(int)natras->autogenMipmap, filter, vcUpgradeMipFilter(natras, filter),
+							effAniso, maxAniso, (int)natras->hasAlpha, (int)natras->isCompressed, gl3Caps.maxAnisotropy);
 				}
 #endif
 			}
-			if(natras->maxAnisotropy != maxAniso){
+			if(natras->maxAnisotropy != effAniso){
 				setActiveTexture(stage);
-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)maxAniso);
-				natras->maxAnisotropy = maxAniso;
+				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)effAniso);
+				natras->maxAnisotropy = effAniso;
 			}
 		}
 	}
@@ -723,7 +753,11 @@ setRasterStage(uint32 stage, Raster *raster)
 			uint32 addrV = rwStateCache.texstage[stage].addressingV;
 			if(natras->filterMode != filter){
 				if(natras->autogenMipmap || natras->numLevels > 1){
+#ifdef LIBRW_VISIONOS
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filterConvMap_MIP[vcUpgradeMipFilter(natras, filter)]);
+#else
 					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filterConvMap_MIP[filter]);
+#endif
 					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filterConvMap_NoMIP[filter]);
 				}else{
 					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filterConvMap_NoMIP[filter]);
@@ -1842,6 +1876,9 @@ vc_get_eye_proj(float m[16])
 extern "C" void
 vc_stereo_restore_main(void)
 {
+	// VC_MSAA: the last eye still sits in the shared multisample FBO -- resolve it
+	// into its slice before we rebind the cinema/HUD buffer. No-op when MSAA is off.
+	vc_stereo_msaa_resolve_pending();
 	unsigned int fbo = vc_external_framebuffer();
 	int w = 0, h = 0;
 	vc_screen_size(&w, &h);
