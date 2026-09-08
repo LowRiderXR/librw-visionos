@@ -253,6 +253,9 @@ rasterCreateZbuffer(Raster *raster)
 		// DEPTH24_STENCIL8; the actual attachment is verified FBO-side instead.)
 		{
 			GLenum storeErr = glGetError();
+			static int depthTexlog = -1;
+			if(depthTexlog < 0){ const char *s = getenv("VC_TEXLOG"); depthTexlog = s ? atoi(s) : 0; }
+			if(depthTexlog)
 			printf("[vc-depth] zbuffer rbo %u created: requested GL_DEPTH24_STENCIL8 %dx%d; storeErr=0x%x\n",
 			       natras->texid, raster->width, raster->height, (unsigned)storeErr);
 		}
@@ -612,8 +615,10 @@ rasterUnlock(Raster *raster, int32 level)
 				natras->maxAnisotropy = aniso;   // sync librw's cache so a later setFilterMode won't reset to 1
 				unsigned long long added = (unsigned long long)raster->stride * (unsigned)h / 3ull;  // mip tail ~= base/3
 				g_vcMipBytesAdded += added;
+				static int mipTexlog = -1;
+				if(mipTexlog < 0){ const char *s = getenv("VC_TEXLOG"); mipTexlog = s ? atoi(s) : 0; }
 				static int mipLogged = 0;
-				if(mipLogged < 8 || (mipLogged % 512) == 0)
+				if(mipTexlog && (mipLogged < 8 || (mipLogged % 512) == 0))
 					printf("[vc-mip] %dx%d levels=%d aniso=%d hasAlpha=%d (+%llu KB, running total ~%llu MB)\n",
 					       w, h, levels, aniso, natras->hasAlpha, added/1024ull, g_vcMipBytesAdded/1000000ull);
 				mipLogged++;

@@ -598,6 +598,7 @@ static GLint addressConvMap[] = {
 };
 
 #ifdef LIBRW_VISIONOS
+static int vcPerfLog(void){ static int v=-1; if(v<0){ v = getenv("VC_PERF_LOG") ? 1 : 0; } return v; }   // diagnostics gate
 static int vcMipmapEnabled(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP"); v=s?atoi(s):1; } return v; }
 static int vcAnisoLevel(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_ANISO"); v=s?atoi(s):16; if(v<1)v=1; if(v>16)v=16; } return v; }
 static int vcMipmapAlpha(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP_ALPHA"); v=s?atoi(s):1; } return v; }
@@ -1352,7 +1353,7 @@ setFrameBuffer(Camera *cam)
 		static bool vcLoggedRedirect = false;
 		if(!vcLoggedRedirect){
 			vcLoggedRedirect = true;
-			printf("[vc-fb] redirecting camera default framebuffer (0) -> external FBO %u\n", fbo);
+			if(vcPerfLog()) printf("[vc-fb] redirecting camera default framebuffer (0) -> external FBO %u\n", fbo);
 		}
 	}
 #endif
@@ -1414,7 +1415,7 @@ setFrameBuffer(Camera *cam)
 		// After the (possibly skipped) attach, read what is REALLY bound as depth
 		// on the now-current fbo. boundDepthName == zTexid -> "is" matches "should";
 		// a mismatch (esp. on the fast path, which attaches nothing) is the bug.
-		if(vcLogChange){
+		if(vcLogChange && vcPerfLog()){
 			GLint boundDepthName = 0;
 			glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
 				GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &boundDepthName);
@@ -1657,7 +1658,7 @@ beginUpdate(Camera *cam)
 				float *finalProj = vcKeepProj ? proj : op;
 
 				static int vcHeadGlN = 0;
-				if((vcHeadGlN++ % 120) == 0){
+				if((vcHeadGlN++ % 120) == 0 && vcPerfLog()){
 					Matrix *ltm = cam->getFrame()->getLTM();
 					printf("[vc-head-gl] compose=%d keepProj=%d  ov_yaw[c0=%.3f c2=%.3f]  cam_up=(%.3f %.3f %.3f)  cam_at=(%.3f %.3f %.3f)\n",
 					       vc_view_compose_active(), vcKeepProj,
@@ -1687,7 +1688,7 @@ beginUpdate(Camera *cam)
 			if(vcMain){
 				if(++vcMainSeen >= 2 && !vcLoggedScope){
 					vcLoggedScope = true;
-					printf("[vc-head-scope] beginUpdate calls/frame=%d injected/frame=%d (expect 1 of N)\n",
+					if(vcPerfLog()) printf("[vc-head-scope] beginUpdate calls/frame=%d injected/frame=%d (expect 1 of N)\n",
 					       vcCalls, vcInjN);
 				}
 				vcCalls = 0; vcInjN = 0; // reset for the next inter-main interval
@@ -1760,7 +1761,7 @@ vc_stereo_eye_pass(int eye)
 		const char *r = getenv("VC_STEREO_REAL");        if(r) sReal = atoi(r);
 		const char *k = getenv("VC_STEREO_KEEP_PROJ");   if(k) sKeepProj = atoi(k);
 		const char *s = getenv("VC_STEREO_WORLD_SCALE"); if(s) sScale = (float)atof(s);
-		printf("[vc-eyes-gl] REAL=%d KEEP_PROJ=%d WORLD_SCALE=%.4f (CANVAS: projected screen)\n",
+		if(vcPerfLog()) printf("[vc-eyes-gl] REAL=%d KEEP_PROJ=%d WORLD_SCALE=%.4f (CANVAS: projected screen)\n",
 		       sReal, sKeepProj, sScale);
 	}
 
@@ -2427,7 +2428,7 @@ initOpenGL(void)
 #ifdef LIBRW_VISIONOS
 	// Measurement (NPC-face bleed / shimmer): does ANGLE-on-Metal honour anisotropic
 	// filtering? cap==1 -> candidate "raise anisotropy" is dead; cap>=16 -> cheapest lever.
-	printf("[vc-tex] maxAnisotropy cap = %.1f\n", gl3Caps.maxAnisotropy);
+	if(getenv("VC_TEXLOG")) printf("[vc-tex] maxAnisotropy cap = %.1f\n", gl3Caps.maxAnisotropy);
 #endif
 
 	if(gl3Caps.gles){
