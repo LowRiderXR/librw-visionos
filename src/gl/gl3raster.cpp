@@ -553,8 +553,12 @@ assert(natras->format == GL_RGBA);
 // meaningful once mips exist; capped by the GL cap at render time is not applied
 // here, so keep <=16). Alpha-masked textures are excluded (coverage thinning is
 // Stufe 2) -- hasAlpha==0 is exactly "not alpha-tested" (see setRasterStage).
-static int vcMipmapEnabled(void) { static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP"); v=s?atoi(s):0; } return v; }
-static int vcMipmapAniso(void)   { static int v=-1; if(v<0){ const char*s=getenv("VC_ANISO");  v=s?atoi(s):8; if(v<1)v=1; if(v>16)v=16; } return v; }
+static int vcMipmapEnabled(void) { static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP"); v=s?atoi(s):1; } return v; }
+static int vcMipmapAniso(void)   { static int v=-1; if(v<0){ const char*s=getenv("VC_ANISO");  v=s?atoi(s):16; if(v<1)v=1; if(v>16)v=16; } return v; }
+// Experiment: include alpha-tested textures (peds/foliage) in the mip COLOUR path.
+// Alpha is box-filtered so silhouette/foliage coverage thins with distance -- watch
+// for that -- but ped body+face (mostly opaque alpha) should stabilise. Default OFF.
+static int vcMipmapAlpha(void)   { static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP_ALPHA"); v=s?atoi(s):1; } return v; }
 static unsigned long long g_vcMipBytesAdded = 0;
 #endif
 
@@ -594,7 +598,7 @@ rasterUnlock(Raster *raster, int32 level)
 			// VC_MIPMAP Stufe 1: opaque, uncompressed, single-level world textures.
 			// readNativeTexture / image conversion / runtime creates ALL funnel their
 			// texel upload through this unlock, so this one hook covers every path.
-			else if(level == 0 && vcMipmapEnabled() && !natras->hasAlpha &&
+			else if(level == 0 && vcMipmapEnabled() && (!natras->hasAlpha || vcMipmapAlpha()) &&
 			        !natras->isCompressed && natras->numLevels == 1 &&
 			        (raster->type == Raster::TEXTURE || raster->type == Raster::NORMAL)){
 				int w = raster->width, h = raster->height;
@@ -610,8 +614,8 @@ rasterUnlock(Raster *raster, int32 level)
 				g_vcMipBytesAdded += added;
 				static int mipLogged = 0;
 				if(mipLogged < 8 || (mipLogged % 512) == 0)
-					printf("[vc-mip] %dx%d levels=%d aniso=%d (+%llu KB, running total ~%llu MB)\n",
-					       w, h, levels, aniso, added/1024ull, g_vcMipBytesAdded/1000000ull);
+					printf("[vc-mip] %dx%d levels=%d aniso=%d hasAlpha=%d (+%llu KB, running total ~%llu MB)\n",
+					       w, h, levels, aniso, natras->hasAlpha, added/1024ull, g_vcMipBytesAdded/1000000ull);
 				mipLogged++;
 			}
 #endif
@@ -1012,6 +1016,22 @@ readNativeTexture(Stream *stream)
 		stream->read8(data, size);
 		raster->unlock(i);
 	}
+#ifdef LIBRW_VISIONOS
+	// VC_TEXLOG: name every streamed texture with its alpha flag + final level count,
+	// so ped/face textures can be identified by NAME and we can see whether hasAlpha=1
+	// excludes them from the Stufe-1 mip path (numLevels stays 1) -> face-bleed is Stufe 2.
+	{
+		static int tl = -1;
+		if(tl < 0){ const char *s = getenv("VC_TEXLOG"); tl = s ? atoi(s) : 0; }
+		if(tl){
+			Gl3Raster *nr = GETGL3RASTEREXT(raster);
+			int mipped = vcMipmapEnabled() && !nr->hasAlpha && !nr->isCompressed && nr->numLevels > 1;
+			printf("[vc-texload] '%s' %dx%d hasAlpha=%d comp=%d numLevels=%d mipped=%s\n",
+			       tex->name, raster->width, raster->height, nr->hasAlpha, nr->isCompressed,
+			       nr->numLevels, mipped ? "YES" : "no");
+		}
+	}
+#endif
 	return tex;
 }
 

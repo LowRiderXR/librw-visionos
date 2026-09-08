@@ -1,3 +1,6 @@
+#ifndef VC_SKINFOG
+#define VC_SKINFOG z
+#endif
 uniform mat4 u_boneMatrices[64];
 
 VSIN(ATTRIB_POS)	vec3 in_pos;
@@ -28,5 +31,9 @@ main(void)
 	v_color = clamp(v_color, 0.0, 1.0);
 	v_color *= u_matColor;
 
-	v_fog = DoFog(gl_Position.z);
+#ifdef VC_SKIN_NOFOG
+	v_fog = 1.0;
+#else
+	v_fog = DoFog(gl_Position.VC_SKINFOG);   // z original; visionOS injects w (see gl3skin.cpp)
+#endif
 }

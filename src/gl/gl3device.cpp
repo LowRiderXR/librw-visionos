@@ -598,15 +598,19 @@ static GLint addressConvMap[] = {
 };
 
 #ifdef LIBRW_VISIONOS
-static int vcMipmapEnabled(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP"); v=s?atoi(s):0; } return v; }
-static int vcAnisoLevel(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_ANISO"); v=s?atoi(s):8; if(v<1)v=1; if(v>16)v=16; } return v; }
+static int vcMipmapEnabled(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP"); v=s?atoi(s):1; } return v; }
+static int vcAnisoLevel(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_ANISO"); v=s?atoi(s):16; if(v<1)v=1; if(v>16)v=16; } return v; }
+static int vcMipmapAlpha(void){ static int v=-1; if(v<0){ const char*s=getenv("VC_MIPMAP_ALPHA"); v=s?atoi(s):1; } return v; }
+// A raster carries our generated mip chain if it has >1 level and was eligible:
+// opaque, OR alpha-tested when the VC_MIPMAP_ALPHA experiment is on.
+static bool vcRasterMipped(Gl3Raster *natras){ return vcMipmapEnabled() && natras->numLevels > 1 && (!natras->hasAlpha || vcMipmapAlpha()); }
 // Opaque world textures that got a generated mip chain (gl3raster VC_MIPMAP path:
 // numLevels>1, no alpha) still arrive with filter=LINEAR, which maps to GL_LINEAR
 // even in filterConvMap_MIP -> the chain would never be sampled. Upgrade the MIN
 // filter to the trilinear variant so the mips are actually read. Alpha-masked
 // textures are excluded here too (Stufe 2).
 static int vcUpgradeMipFilter(Gl3Raster *natras, int32 filter){
-	if(vcMipmapEnabled() && !natras->hasAlpha && natras->numLevels > 1){
+	if(vcRasterMipped(natras)){
 		if(filter == Texture::LINEAR)  return Texture::LINEARMIPLINEAR;   // trilinear
 		if(filter == Texture::NEAREST) return Texture::MIPNEAREST;        // nearest + mip
 	}
@@ -626,7 +630,7 @@ setFilterMode(uint32 stage, int32 filter, int32 maxAniso = 1)
 #ifdef LIBRW_VISIONOS
 			// Opaque mipped world textures run through THIS path and would otherwise
 			// have aniso reset to the incoming maxAniso (=1). Enforce VC_ANISO here.
-			if(vcMipmapEnabled() && !natras->hasAlpha && natras->numLevels > 1 && vcAnisoLevel() > effAniso)
+			if(vcRasterMipped(natras) && vcAnisoLevel() > effAniso)
 				effAniso = vcAnisoLevel();
 #endif
 			if(natras->filterMode != filter){
