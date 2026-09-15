@@ -1777,10 +1777,11 @@ vc_stereo_eye_pass(int eye)
 		// view here is game-camera + head look + this eye's IPD. Only the IPD is added
 		// in this pass; the head rotation comes from vcMainView, the convergence from
 		// the per-eye display-quad projection.
+		int me = eye;
 		simd_float4 tL = em.view[0].columns[3];
 		simd_float4 tR = em.view[1].columns[3];
 		simd_float4 tM = 0.5f * (tL + tR);
-		simd_float4 te = em.view[eye].columns[3];
+		simd_float4 te = em.view[me].columns[3];
 		v[12] += (te.x - tM.x) * sScale;
 		v[13] += (te.y - tM.y) * sScale;
 		v[14] += (te.z - tM.z) * sScale;
@@ -1803,7 +1804,7 @@ vc_stereo_eye_pass(int eye)
 			// in the display (uv.x flip), not here. Depth (rows 2/3) REBUILT from the
 			// game near/far, standard-Z: the compositor depth is reverse-Z in metres
 			// and would re-trigger the reverse-Z black screen.
-			const float *cp = (const float *)&em.projection[eye];  // column-major
+			const float *cp = (const float *)&em.projection[me];  // column-major
 			memset(p, 0, sizeof(p));
 			p[0]  = cp[0];         // FOV x
 			p[5]  = cp[5];         // FOV y
