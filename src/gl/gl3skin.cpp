@@ -291,6 +291,49 @@ skinRenderCB(Atomic *atomic, InstanceDataHeader *header)
 	teardownVertexInput(header);
 }
 
+#ifdef LIBRW_VISIONOS
+// The two ped shader fixes below are needed by a SECOND pipeline as well: reVC's neo rim
+// pipeline (src/extras/custompipes_gl.cpp) compiles its own copy of simple.frag plus its own
+// skin vertex shader, and peds get that pipeline UNCONDITIONALLY
+// (CPedModelInfo::SetClump -> CustomPipes::AttachRimPipe). Without sharing the defines, both
+// fixes silently stopped applying whenever "CHARAKTER KANTEN LICHT" (NeoRimLight) was on --
+// device-confirmed: the NPC discoloration came back with the effect enabled. Exported here so
+// value and default live in ONE place.
+//
+// VC_SKIN_FOG: skinned models fed clip-Z to DoFog (skin.vert / neoRimSkin.vert) while
+// buildings (default.vert) and neoRim.vert feed clip-W. Our per-eye rebuilt projection makes
+// clip-Z the wrong fog input. =z restores the original for A/B, =o isolates fog entirely.
+extern "C" const char *vc_skin_fog_define(void)
+{
+	static const char *def = NULL;
+	if(!def){
+		const char *e = getenv("VC_SKIN_FOG");
+		if(e && e[0] == 'z')       def = "#define VC_SKINFOG z\n";      // original (desktop)
+		else if(e && e[0] == 'o')  def = "#define VC_SKIN_NOFOG 1\n";   // fog isolation test
+		else                       def = "#define VC_SKINFOG w\n";      // default fix (view depth)
+	}
+	return def;
+}
+// VC_SKIN_LODBIAS: peds pack face+body+clothes in one atlas; at low pixel coverage (distance
+// / VR angular resolution) the trilinear mip averages adjacent UV regions -> discoloration.
+// Negative bias = sharper mip, trades that bleed for a little more shimmer. =0 disables.
+extern "C" const char *vc_skin_lodbias_define(void)
+{
+	static const char *def = NULL;
+	if(!def){
+		const char *e = getenv("VC_SKIN_LODBIAS");
+		float bias = (e && e[0]) ? (float)atof(e) : -2.5f;
+		if(bias != 0.0f){
+			static char buf[64];
+			snprintf(buf, sizeof(buf), "#define VC_SKIN_LODBIAS (%f)\n", bias);
+			def = buf;
+		}else
+			def = "";
+	}
+	return def;
+}
+#endif
+
 static void*
 skinOpen(void *o, int32, int32)
 {
@@ -299,17 +342,9 @@ skinOpen(void *o, int32, int32)
 #include "shaders/simple_fs_gl.inc"
 #include "shaders/skin_gl.inc"
 #ifdef LIBRW_VISIONOS
-	// NPC fog fix: skinned models fed clip-Z to DoFog (skin.vert), buildings feed
-	// clip-W (default.vert). Our per-eye rebuilt projection makes clip-Z the wrong
-	// fog input, so NPCs tint to the fog colour even up close (desktop-only-correct
-	// bug). Force W to match buildings. VC_SKIN_FOG=z restores the original for A/B.
-	static const char *vcSkinFogDef = NULL;
-	if(!vcSkinFogDef){
-		const char *e = getenv("VC_SKIN_FOG");
-		if(e && e[0] == 'z')       vcSkinFogDef = "#define VC_SKINFOG z\n";      // original (desktop)
-		else if(e && e[0] == 'o')  vcSkinFogDef = "#define VC_SKIN_NOFOG 1\n";   // "off" -> v_fog=1 (fog isolation test)
-		else                        vcSkinFogDef = "#define VC_SKINFOG w\n";      // default fix (view depth)
-	}
+	// Fog + mip-bias defines now come from the shared getters above (same value for this
+	// pipeline and reVC's neo rim pipeline).
+	const char *vcSkinFogDef = vc_skin_fog_define();
 	const char *vs[] = { shaderDecl, vcSkinFogDef, header_vert_src, skin_vert_src, nil };
 	const char *vs_fullLight[] = { shaderDecl, vcSkinFogDef, "#define DIRECTIONALS\n#define POINTLIGHTS\n#define SPOTLIGHTS\n", header_vert_src, skin_vert_src, nil };
 #else
@@ -317,22 +352,7 @@ skinOpen(void *o, int32, int32)
 	const char *vs_fullLight[] = { shaderDecl, "#define DIRECTIONALS\n#define POINTLIGHTS\n#define SPOTLIGHTS\n", header_vert_src, skin_vert_src, nil };
 #endif
 #ifdef LIBRW_VISIONOS
-	// NPC atlas-bleed mitigation: skinned peds pack face+body+clothes in one atlas;
-	// at low pixel coverage (distance / VR angular res) the trilinear mip averages
-	// adjacent UV regions -> discoloration. VC_SKIN_LODBIAS (negative = sharper mip)
-	// trades that bleed for a little more shimmer. Default off (no bias).
-	static const char *vcSkinLodDef = NULL;
-	if(!vcSkinLodDef){
-		const char *e = getenv("VC_SKIN_LODBIAS");
-		float bias = (e && e[0]) ? (float)atof(e) : -2.5f;   // default -2.5 (fixes NPC atlas-bleed); VC_SKIN_LODBIAS=0 disables
-		if(bias != 0.0f){
-			static char buf[64];
-			snprintf(buf, sizeof(buf), "#define VC_SKIN_LODBIAS (%f)\n", bias);
-			vcSkinLodDef = buf;
-		}else{
-			vcSkinLodDef = "";   // no bias
-		}
-	}
+	const char *vcSkinLodDef = vc_skin_lodbias_define();
 	const char *fs[]     = { shaderDecl, vcSkinLodDef, header_frag_src, simple_frag_src, nil };
 	const char *fs_noAT[] = { shaderDecl, vcSkinLodDef, "#define NO_ALPHATEST\n", header_frag_src, simple_frag_src, nil };
 #else
