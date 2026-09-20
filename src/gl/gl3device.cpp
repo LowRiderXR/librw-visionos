@@ -63,6 +63,24 @@ typedef struct vc_stereo_eye_matrices_t {
 extern "C" bool vc_get_stereo_eye_matrices(vc_stereo_eye_matrices_t *out);
 #endif
 
+#ifdef LIBRW_VISIONOS
+extern "C" unsigned g_vcTexBinds;   // see visionos.cpp (per-draw overhead split)
+// Splitting the eye-pass boundary. MEASURED on device: with VC_MSAA=2 the wait sits in
+// eyPre (the resolve blit), with VC_MSAA=0 it moves to eyClr (the full-screen clear) --
+// SAME total either way. So the boundary is not an expensive operation, it is a
+// SYNCHRONISATION POINT: whichever call first touches the render target absorbs the wait.
+// (eyBind is always ~0: ANGLE binds lazily and only creates the Metal encoder on the first
+// real operation.) Slot ids match the VC_SC_* enum in visionos.cpp.
+extern "C" void vc_scene_begin(int id);
+extern "C" void vc_scene_end(int id);
+extern "C" void vc_scene_set_eye(int eye);
+#define VC_SC_EYBIND 13
+#define VC_SC_EYCLR  14
+#define VC_SC_EYMTX  15
+#define VC_SC_EYPRE  16   // prologue: vcrt_stereo_ensure + vc_stereo_eye_fbo (MSAA resolve!)
+
+#endif
+
 namespace rw {
 namespace gl3 {
 
@@ -566,6 +584,9 @@ bindTexture(uint32 texid)
 {
 	uint32 prev = boundTexture[activeTexture];
 	if(prev != texid){
+#ifdef LIBRW_VISIONOS
+		g_vcTexBinds++;   // real glBindTexture calls, for the per-draw overhead split
+#endif
 		boundTexture[activeTexture] = texid;
 		glBindTexture(GL_TEXTURE_2D, texid);
 	}
@@ -1725,16 +1746,32 @@ beginUpdate(Camera *cam)
 extern "C" void
 vc_stereo_eye_pass(int eye)
 {
-	if(!vcrt_stereo_ensure())
+	// The prologue was OUTSIDE the brackets and held ~4.9 of 5.0 ms: with MSAA on,
+	// vc_stereo_eye_fbo resolves the PREVIOUS eye here (glBlitFramebuffer), which cannot
+	// start before that eye's rendering has finished on the GPU. Bracketed now so the
+	// wait is attributed instead of hiding in a gap.
+	// Book everything from here on under THIS eye (vcEyeTag in main.cpp is only set after
+	// this function returns, so the boundary stages would all land in eye 0's bucket).
+	vc_scene_set_eye(eye);
+	vc_scene_begin(VC_SC_EYPRE);
+	if(!vcrt_stereo_ensure()){
+		vc_scene_end(VC_SC_EYPRE);
 		return;
+	}
 	unsigned int fbo = vc_stereo_eye_fbo(eye);
-	if(fbo == 0)
+	if(fbo == 0){
+		vc_scene_end(VC_SC_EYPRE);
 		return;
+	}
 	int w = 0, h = 0;
 	vc_screen_size(&w, &h);
+	vc_scene_end(VC_SC_EYPRE);
 
+	vc_scene_begin(VC_SC_EYBIND);
 	bindFramebuffer(fbo);
 	glViewport(0, 0, w, h);
+	vc_scene_end(VC_SC_EYBIND);
+	vc_scene_begin(VC_SC_EYCLR);
 	glDepthMask(GL_TRUE);
 	// Clear the slice to the SKY colour (set per frame from CTimeCycle) instead of
 	// black, so the sky fills the whole eye FOV as a world-anchored solid -- the
@@ -1745,6 +1782,8 @@ vc_stereo_eye_pass(int eye)
 	uint32 zmask = rwStateCache.zwrite ? GL_TRUE : GL_FALSE;
 	glDepthMask(zmask);
 	oldGlState.depthMask = zmask;
+	vc_scene_end(VC_SC_EYCLR);
+	vc_scene_begin(VC_SC_EYMTX);
 
 	float v[16];
 	memcpy(v, vcMainView, sizeof(v));
@@ -1848,6 +1887,7 @@ vc_stereo_eye_pass(int eye)
 	memcpy(g_vcEyeView, v, sizeof(v));
 	memcpy(g_vcEyeProj, p, sizeof(p));
 	g_vcEyeViewValid = 1;
+	vc_scene_end(VC_SC_EYMTX);
 }
 
 // The eye VIEW (librw convention, column-major) that the last vc_stereo_eye_pass

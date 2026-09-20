@@ -11,7 +11,24 @@
 #ifdef RW_GL3
 #define RW_OPENGL
 #define RWDEVICE gl3
-// doesn't help
+// Upstream (aap, d541301 2020-05-15, "tried VAOs, didnt help") measured no gain -- on a
+// DESKTOP GL driver, where an entry point costs tens of nanoseconds. We go through
+// ANGLE -> Metal, where every call is validated and translated, and the non-VAO path
+// re-specifies the vertex input per atomic: 2x glBindBuffer, then per attribute
+// glEnableVertexAttribArray + glVertexAttribPointer, plus glDisableVertexAttribArray on
+// teardown -- roughly 20 calls where the VAO path needs one glBindVertexArray.
+// Device measurement behind this: of 2.7 us per draw, only 0.5 us are inside
+// drawInst_simple (flushCache 0.07, glDrawElements 0.42 -- both already cheap); the other
+// 2.2 us are in exactly this per-atomic setup. So the premise of "didn't help" does not
+// transfer to our backend.
+// visionOS only: the macOS reference build stays on the upstream-tested path while this
+// is unproven. The VAO branches were kept in sync through the 2021 refactor
+// (576d211 "vertex input stream functions") but have not been COMPILED since 2020.
+// MEASURED ON DEVICE (2026-09-19): no gain here either. us/draw stayed at 2,8-3,3 (before:
+// 2,7-3,1), i.e. the ~2.2 us per draw are NOT the attribute setup -- and the im2d/im3d path
+// showed a visible regression (coronas: traffic lights and lamps). So: upstream's verdict
+// holds for our backend too, for a different reason. Left off; the next step is to time
+// setupVertexInput and the render callbacks individually instead of guessing.
 //#define RW_GL_USE_VAOS
 #endif
 

@@ -15,14 +15,61 @@
 
 #include "rwgl3impl.h"
 
+#ifdef LIBRW_VISIONOS
+// Draw-call counter for the [vc-frame] probe. drawInst_simple is the ONE glDrawElements
+// funnel for all atomic pipelines (default, matfx, skin -- they all go through drawInst),
+// so counting here catches every world draw, including the PS2 alpha-test emulation which
+// issues TWO draws per alpha-blended instance. Split by eye pass so the per-eye submission
+// cost is visible. Storage and per-frame reset live in visionos.cpp.
+extern "C" int vc_in_stereo_eye(void);   // 0 = mono/outside the loop, 1 = eye 0, 2 = eye 1
+extern "C" unsigned g_vcDraws[3];
+extern "C" unsigned g_vcTris[3];
+// Per-draw overhead split (VC_DRAW_PROFILE=1): flushCache() -- GL state diffing plus the
+// uniform registry walk -- against the bare glDrawElements. Two clock reads per draw, so
+// it is gated; see visionos.cpp.
+#include <mach/mach_time.h>
+extern "C" int vc_draw_profile(void);
+extern "C" uint64_t g_vcFlushTicks, g_vcDrawTicks;
+// Finer split of the ~2.2 us per draw that sit OUTSIDE drawInst_simple (VAOs were
+// measured and did NOT help, so the attribute setup is not it):
+//   VTX = setupVertexInput + teardownVertexInput (per atomic)
+//   PRE = per-atomic prologue: setWorldMatrix + lightingCB
+//   MAT = per-mesh material/texture/shader selection before each draw
+// eyes - (vtx+pre+mat+flush+gldraw) = what is left in reVC above librw.
+extern "C" uint64_t g_vcVtxTicks, g_vcPreTicks, g_vcMatTicks;
+#endif
+
 namespace rw {
 namespace gl3 {
 
-#define MAX_LIGHTS 
+#define MAX_LIGHTS
 
 void
 drawInst_simple(InstanceDataHeader *header, InstanceData *inst)
 {
+#ifdef LIBRW_VISIONOS
+	{
+		int et = vc_in_stereo_eye();
+		if(et < 0 || et > 2) et = 0;
+		g_vcDraws[et]++;
+		g_vcTris[et] += (header->primType == GL_TRIANGLE_STRIP)
+		              ? (inst->numIndex >= 2 ? inst->numIndex - 2 : 0)
+		              : inst->numIndex / 3;
+	}
+	static int prof = -1;
+	if(prof < 0) prof = vc_draw_profile();
+	if(prof){
+		uint64_t t0 = mach_absolute_time();
+		flushCache();
+		uint64_t t1 = mach_absolute_time();
+		glDrawElements(header->primType, inst->numIndex,
+		               GL_UNSIGNED_SHORT, (void*)(uintptr)inst->offset);
+		uint64_t t2 = mach_absolute_time();
+		g_vcFlushTicks += t1 - t0;
+		g_vcDrawTicks  += t2 - t1;
+		return;
+	}
+#endif
 	flushCache();
 	glDrawElements(header->primType, inst->numIndex,
 	               GL_UNSIGNED_SHORT, (void*)(uintptr)inst->offset);
@@ -141,16 +188,31 @@ defaultRenderCB(Atomic *atomic, InstanceDataHeader *header)
 	Material *m;
 
 	uint32 flags = atomic->geometry->flags;
+#ifdef LIBRW_VISIONOS
+	static int prof = -1;
+	if(prof < 0) prof = vc_draw_profile();
+	uint64_t tA = prof ? mach_absolute_time() : 0;
+#endif
 	setWorldMatrix(atomic->getFrame()->getLTM());
 	int32 vsBits = lightingCB(atomic);
+#ifdef LIBRW_VISIONOS
+	uint64_t tB = prof ? mach_absolute_time() : 0;
+#endif
 
 	setupVertexInput(header);
+#ifdef LIBRW_VISIONOS
+	uint64_t tC = prof ? mach_absolute_time() : 0;
+	if(prof){ g_vcPreTicks += tB - tA; g_vcVtxTicks += tC - tB; }
+#endif
 
 	InstanceData *inst = header->inst;
 	int32 n = header->numMeshes;
 
 	while(n--){
 		m = inst->material;
+#ifdef LIBRW_VISIONOS
+		uint64_t tM = prof ? mach_absolute_time() : 0;
+#endif
 
 		setMaterial(flags, m->color, m->surfaceProps);
 
@@ -169,11 +231,20 @@ defaultRenderCB(Atomic *atomic, InstanceDataHeader *header)
 			else
 				defaultShader_fullLight_noAT->use();
 		}
+#ifdef LIBRW_VISIONOS
+		if(prof) g_vcMatTicks += mach_absolute_time() - tM;
+#endif
 
 		drawInst(header, inst);
 		inst++;
 	}
+#ifdef LIBRW_VISIONOS
+	uint64_t tT = prof ? mach_absolute_time() : 0;
+#endif
 	teardownVertexInput(header);
+#ifdef LIBRW_VISIONOS
+	if(prof) g_vcVtxTicks += mach_absolute_time() - tT;
+#endif
 }
 
 

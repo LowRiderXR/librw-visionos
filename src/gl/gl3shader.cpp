@@ -13,6 +13,13 @@
 #include "rwgl3.h"
 #include "rwgl3shader.h"
 
+#ifdef LIBRW_VISIONOS
+// GL entry points that actually fire per draw -- each one is a validated call through
+// ANGLE, and flushUniforms re-walks the WHOLE uniform registry on every draw. Counted to
+// split the measured ~2.2 us/draw. Storage/reset in visionos.cpp.
+extern "C" unsigned g_vcUniCalls, g_vcShaderSwitch;
+#endif
+
 namespace rw {
 namespace gl3 {
 
@@ -133,7 +140,10 @@ flushUniforms(void)
 			continue;
 
 		Uniform *u = &uniformRegistry.uniforms[i];
-		if(currentShader->serialNums[i] != u->serialNum)
+		if(currentShader->serialNums[i] != u->serialNum){
+#ifdef LIBRW_VISIONOS
+			g_vcUniCalls++;   // counts the uniforms re-uploaded for this draw
+#endif
 			switch(u->type){
 			case UNIFORM_NA:
 				break;
@@ -147,6 +157,7 @@ flushUniforms(void)
 				glUniformMatrix4fv(loc, u->num, GL_FALSE, (GLfloat*)u->data);
 				break;
 			}
+		}
 		currentShader->serialNums[i] = u->serialNum;
 	}
 }
@@ -335,6 +346,9 @@ void
 Shader::use(void)
 {
 	if(currentShader != this){
+#ifdef LIBRW_VISIONOS
+		g_vcShaderSwitch++;
+#endif
 		glUseProgram(this->program);
 		currentShader = this;
 	}
