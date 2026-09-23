@@ -15,6 +15,26 @@
 #include "rwgl3impl.h"
 #include "rwgl3shader.h"
 
+#ifdef LIBRW_VISIONOS
+// Draw counter for the IMMEDIATE paths (im2d/im3d), split by eye pass like g_vcDraws.
+// g_vcDraws counts only drawInst_simple (the atomic pipelines), so sprites, particles,
+// coronas, clouds, rain and HUD were invisible to the profiler. This share decides how
+// much of the frame multiview can touch at all: im2d geometry is CPU-projected per eye
+// (CalcScreenCoors bakes the eye into the VERTICES, not into a matrix), so one
+// amplified pass cannot render it correctly without further work. Indices:
+// [0] outside the eye loop, [1] eye 0, [2] eye 1. Storage/reset in visionos.cpp.
+extern "C" int vc_in_stereo_eye(void);
+extern "C" unsigned g_vcImmDraws[3];
+static inline void vcCountImmDraw(void)
+{
+	int et = vc_in_stereo_eye();
+	if(et < 0 || et > 2) et = 0;
+	g_vcImmDraws[et]++;
+}
+#else
+static inline void vcCountImmDraw(void) {}
+#endif
+
 namespace rw {
 namespace gl3 {
 
@@ -147,6 +167,7 @@ im2DRenderPrimitive(PrimitiveType primType, void *vertices, int32 numVertices)
 	im2DSetXform();
 
 	flushCache();
+	vcCountImmDraw();
 	glDrawArrays(primTypeMap[primType], 0, numVertices);
 #ifndef RW_GL_USE_VAOS
 	disableAttribPointers(im2dattribDesc, 3);
@@ -181,6 +202,7 @@ im2DRenderIndexedPrimitive(PrimitiveType primType,
 	im2DSetXform();
 
 	flushCache();
+	vcCountImmDraw();
 	glDrawElements(primTypeMap[primType], numIndices,
 	               GL_UNSIGNED_SHORT, nil);
 #ifndef RW_GL_USE_VAOS
@@ -277,6 +299,7 @@ im3DRenderPrimitive(PrimitiveType primType)
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, im3DIbo);
 
 	flushCache();
+	vcCountImmDraw();
 	glDrawArrays(primTypeMap[primType], 0, num3DVertices);
 }
 
@@ -288,6 +311,7 @@ im3DRenderIndexedPrimitive(PrimitiveType primType, void *indices, int32 numIndic
 	glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, numIndices*2, indices);
 
 	flushCache();
+	vcCountImmDraw();
 	glDrawElements(primTypeMap[primType], numIndices,
 	               GL_UNSIGNED_SHORT, nil);
 }
