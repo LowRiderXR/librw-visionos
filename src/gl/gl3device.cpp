@@ -52,6 +52,7 @@ extern "C" void         vcrt_mv_pairs_report(void);   // 5.0b/1: one-shot multiv
 extern "C" unsigned int vc_multiview_fbo(void);        // 5.0b/2: the one FBO whose binding selects the twins (0 = none yet)
 extern "C" void         vc_multiview_fbo_set(unsigned int fbo);
 extern "C" int          vc_mv_pairs_mode(void);
+extern "C" int          vc_multiview_active(void);    // 5.0b/5: one-pass render active (getter semantics)
 extern "C" void         vc_stereo_msaa_resolve_pending(void);   // VC_MSAA: resolve last eye's MSAA into its slice
 // Phase 5.6: real per-eye compositor matrices, already in librw convention (LH /
 // +Z / clip depth -1..1), translations in METRES. Mirror of vc_stereo_eye_matrices_t
@@ -1823,12 +1824,24 @@ vc_stereo_eye_pass(int eye)
 	glViewport(0, 0, w, h);
 	vc_scene_end(VC_SC_EYBIND);
 	vc_scene_begin(VC_SC_EYCLR);
+	// Clear hygiene (multiview-plan.md 5.0b/4, risk L1): ANGLE turns this glClear
+	// into the pass's loadAction=Clear ONLY if scissor is off, colour/depth/stencil
+	// write masks are full and no draw happened yet. Anything else becomes a draw
+	// (colour) or is skipped (depth/stencil under a zero mask) and the memoryless
+	// attachment starts with Load or garbage -- measured on device 2026-09-25
+	// (vc-mv5 inherited glDepthMask(FALSE): depth clear skipped). All three bits,
+	// because D24S8 is one attachment: a colour+depth-only clear leaves stencil
+	// on Load. Verified via [angle-vrr] passLoads/s (Clear/Clear/Clear).
 	glDepthMask(GL_TRUE);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glDisable(GL_SCISSOR_TEST);
+	glStencilMask(0xFFFFFFFFu);
+	oldGlState.stencilWriteMask = 0xFFFFFFFFu;   // keep the low-level cache truthful
 	// Clear the slice to the SKY colour (set per frame from CTimeCycle) instead of
 	// black, so the sky fills the whole eye FOV as a world-anchored solid -- the
 	// screen-space gradient/horizon band (which head-locked) is skipped in stereo.
 	glClearColor(g_vcSkyClear[0], g_vcSkyClear[1], g_vcSkyClear[2], 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 	// restore the depth-write state librw expects, and keep its cache in sync
 	uint32 zmask = rwStateCache.zwrite ? GL_TRUE : GL_FALSE;
 	glDepthMask(zmask);
@@ -1947,6 +1960,14 @@ extern "C" int
 vc_get_eye_view(float m[16])
 {
 	if(!g_vcEyeViewValid) return 0;
+	// 5.0b/5 getter semantics: in the one-pass render there is no "last eye" --
+	// CPU readers (cull head pose, head-forward, CalcScreenCoors, game camera)
+	// get the CENTRE view (head x game, before the IPD offset). The projection
+	// getter below stays: the slice projection is symmetric, equal for both eyes.
+	if(vc_multiview_active()){
+		memcpy(m, vcMainView, 16*sizeof(float));
+		return 1;
+	}
 	memcpy(m, g_vcEyeView, 16*sizeof(float));
 	return 1;
 }
