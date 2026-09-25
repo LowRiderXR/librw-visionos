@@ -163,6 +163,16 @@ flushUniforms(void)
 }
 
 Shader *currentShader;
+#ifdef LIBRW_VISIONOS
+bool vcMultiviewBound = false;
+unsigned g_vcUseMono = 0, g_vcUseMv = 0;
+extern "C" void vc_mv_use_counts(unsigned *mono, unsigned *mv, int reset)
+{
+	if(mono) *mono = g_vcUseMono;
+	if(mv) *mv = g_vcUseMv;
+	if(reset){ g_vcUseMono = 0; g_vcUseMv = 0; }
+}
+#endif
 
 static void
 printShaderSource(const char **src)
@@ -441,13 +451,25 @@ buildProgram(const char **vsrc, const char **fsrc)
 void
 Shader::use(void)
 {
-	if(currentShader != this){
 #ifdef LIBRW_VISIONOS
+	// 5.0b/2: the switch point is the ACTUAL framebuffer binding, not a mode
+	// flag -- so an early-out of the eye pass (world into the HUD FBO), menus,
+	// splash and any other frame without the multiview FBO stay mono by
+	// construction. A shader without a twin (post effects) keeps its mono
+	// program; those never run in the world pass.
+	Shader *target = (vcMultiviewBound && this->mv) ? this->mv : this;
+	if(target != this) g_vcUseMv++; else g_vcUseMono++;
+	if(currentShader != target){
 		g_vcShaderSwitch++;
-#endif
+		glUseProgram(target->program);
+		currentShader = target;
+	}
+#else
+	if(currentShader != this){
 		glUseProgram(this->program);
 		currentShader = this;
 	}
+#endif
 }
 
 void

@@ -49,6 +49,9 @@ extern "C" int  vc_render_mode(void);           // 1 = VC_MODE_STEREO (sprite he
 extern "C" bool         vcrt_stereo_ensure(void);
 extern "C" unsigned int vc_stereo_eye_fbo(int eye);
 extern "C" void         vcrt_mv_pairs_report(void);   // 5.0b/1: one-shot multiview program-pair summary
+extern "C" unsigned int vc_multiview_fbo(void);        // 5.0b/2: the one FBO whose binding selects the twins (0 = none yet)
+extern "C" void         vc_multiview_fbo_set(unsigned int fbo);
+extern "C" int          vc_mv_pairs_mode(void);
 extern "C" void         vc_stereo_msaa_resolve_pending(void);   // VC_MSAA: resolve last eye's MSAA into its slice
 // Phase 5.6: real per-eye compositor matrices, already in librw convention (LH /
 // +Z / clip depth -1..1), translations in METRES. Mirror of vc_stereo_eye_matrices_t
@@ -604,7 +607,46 @@ bindFramebuffer(uint32 fbo)
 		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 		currentFramebuffer = fbo;
 	}
+#ifdef LIBRW_VISIONOS
+	// 5.0b/2: program selection follows the binding (see Shader::use).
+	{
+		unsigned int mv = vc_multiview_fbo();
+		vcMultiviewBound = (mv != 0 && fbo == mv);
+	}
+#endif
 }
+
+#ifdef LIBRW_VISIONOS
+// 5.0b/2 self-test (called from the vc-mv5 import test with its 2-view FBO):
+// registering that FBO as the multiview FBO and binding it through the librw
+// wrapper must make use() pick the twin; rebinding the previous FBO must fall
+// back to the mono program. Restores registration, binding and program.
+// Returns bit2 = pairs available, bit0 = twin selected, bit1 = mono restored.
+extern "C" int
+vc_mv_bind_switch_selftest(unsigned int mvFbo)
+{
+	int r = 0;
+	if(vc_mv_pairs_mode() != 1 || defaultShader == nil || defaultShader->mv == nil)
+		return r;
+	r |= 4;
+	uint32 prevFbo = currentFramebuffer;
+	Shader *prevShader = currentShader;
+	// The test's own use() calls must not show up in the per-second selection
+	// counters (device 2026-09-25: it produced the one "mv=1" FAIL line).
+	unsigned mono0 = g_vcUseMono, mv0 = g_vcUseMv;
+	vc_multiview_fbo_set(mvFbo);
+	bindFramebuffer(mvFbo);
+	defaultShader->use();
+	if(currentShader == defaultShader->mv) r |= 1;
+	vc_multiview_fbo_set(0);
+	bindFramebuffer(prevFbo);
+	defaultShader->use();
+	if(currentShader == defaultShader) r |= 2;
+	if(prevShader) prevShader->use();
+	g_vcUseMono = mono0; g_vcUseMv = mv0;
+	return r;
+}
+#endif
 
 static GLint filterConvMap_NoMIP[] = {
 	0, GL_NEAREST, GL_LINEAR,

@@ -69,6 +69,12 @@ struct Shader
 };
 
 extern Shader *currentShader;
+#ifdef LIBRW_VISIONOS
+// 5.0b/2: set by bindFramebuffer() when the bound FBO is the registered multiview
+// FBO (vc_multiview_fbo(), 0 until Stufe 5.1). Shader::use() then selects the twin.
+extern bool vcMultiviewBound;
+extern unsigned g_vcUseMono, g_vcUseMv;   // use() selections per frame (report)
+#endif
 
 }
 }
