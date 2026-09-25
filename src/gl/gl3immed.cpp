@@ -80,7 +80,7 @@ openIm2D(void)
 #include "shaders/simple_fs_gl.inc"
 	const char *vs[] = { shaderDecl, header_vert_src, im2d_vert_src, nil };
 	const char *fs[] = { shaderDecl, header_frag_src, simple_frag_src, nil };
-	im2dShader = Shader::create(vs, fs);
+	im2dShader = Shader::create(vs, fs, "im2d");
 	assert(im2dShader);
 
 	glGenBuffers(1, &im2DIbo);
@@ -236,7 +236,7 @@ openIm3D(void)
 #include "shaders/simple_fs_gl.inc"
 	const char *vs[] = { shaderDecl, header_vert_src, im3d_vert_src, nil };
 	const char *fs[] = { shaderDecl, header_frag_src, simple_frag_src, nil };
-	im3dShader = Shader::create(vs, fs);
+	im3dShader = Shader::create(vs, fs, "im3d");
 	assert(im3dShader);
 
 	glGenBuffers(1, &im3DIbo);

@@ -360,14 +360,14 @@ skinOpen(void *o, int32, int32)
 	const char *fs_noAT[] = { shaderDecl, "#define NO_ALPHATEST\n", header_frag_src, simple_frag_src, nil };
 #endif
 
-	skinShader = Shader::create(vs, fs);
+	skinShader = Shader::create(vs, fs, "skin");
 	assert(skinShader);
-	skinShader_noAT = Shader::create(vs, fs_noAT);
+	skinShader_noAT = Shader::create(vs, fs_noAT, "skin_noAT");
 	assert(skinShader_noAT);
 
-	skinShader_fullLight = Shader::create(vs_fullLight, fs);
+	skinShader_fullLight = Shader::create(vs_fullLight, fs, "skin_fullLight");
 	assert(skinShader_fullLight);
-	skinShader_fullLight_noAT = Shader::create(vs_fullLight, fs_noAT);
+	skinShader_fullLight_noAT = Shader::create(vs_fullLight, fs_noAT, "skin_fullLight_noAT");
 	assert(skinShader_fullLight_noAT);
 
 	return o;

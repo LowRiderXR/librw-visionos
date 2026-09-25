@@ -204,14 +204,14 @@ matfxOpen(void *o, int32, int32)
 	const char *fs[] = { shaderDecl, header_frag_src, matfx_env_frag_src, nil };
 	const char *fs_noAT[] = { shaderDecl, "#define NO_ALPHATEST\n", header_frag_src, matfx_env_frag_src, nil };
 
-	envShader = Shader::create(vs, fs);
+	envShader = Shader::create(vs, fs, "matfx_env");
 	assert(envShader);
-	envShader_noAT = Shader::create(vs, fs_noAT);
+	envShader_noAT = Shader::create(vs, fs_noAT, "matfx_env_noAT");
 	assert(envShader_noAT);
 
-	envShader_fullLight = Shader::create(vs_fullLight, fs);
+	envShader_fullLight = Shader::create(vs_fullLight, fs, "matfx_env_fullLight");
 	assert(envShader_fullLight);
-	envShader_fullLight_noAT = Shader::create(vs_fullLight, fs_noAT);
+	envShader_fullLight_noAT = Shader::create(vs_fullLight, fs_noAT, "matfx_env_fullLight_noAT");
 	assert(envShader_fullLight_noAT);
 
 	return o;

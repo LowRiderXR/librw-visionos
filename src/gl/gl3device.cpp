@@ -48,6 +48,7 @@ extern "C" int  vc_render_mode(void);           // 1 = VC_MODE_STEREO (sprite he
 // target and get a slice's GL FBO. The two eye passes below redirect to these.
 extern "C" bool         vcrt_stereo_ensure(void);
 extern "C" unsigned int vc_stereo_eye_fbo(int eye);
+extern "C" void         vcrt_mv_pairs_report(void);   // 5.0b/1: one-shot multiview program-pair summary
 extern "C" void         vc_stereo_msaa_resolve_pending(void);   // VC_MSAA: resolve last eye's MSAA into its slice
 // Phase 5.6: real per-eye compositor matrices, already in librw convention (LH /
 // +Z / clip depth -1..1), translations in METRES. Mirror of vc_stereo_eye_matrices_t
@@ -194,6 +195,9 @@ int32 u_fogColor;
 
 // Scene
 int32 u_proj;
+#ifdef LIBRW_VISIONOS
+int32 u_projMV, u_viewMV;   // multiview twins' per-view matrices (5.0b/1)
+#endif
 int32 u_view;
 
 // Object
@@ -1763,6 +1767,11 @@ vc_stereo_eye_pass(int eye)
 		vc_scene_end(VC_SC_EYPRE);
 		return;
 	}
+	{
+		// All shader families (librw + custom pipes) exist by the first world pass.
+		static bool mvReported = false;
+		if(!mvReported){ mvReported = true; vcrt_mv_pairs_report(); }
+	}
 	int w = 0, h = 0;
 	vc_screen_size(&w, &h);
 	vc_scene_end(VC_SC_EYPRE);
@@ -2493,6 +2502,12 @@ initOpenGL(void)
 	u_fogColor = registerUniform("u_fogColor", UNIFORM_VEC4);
 	u_proj = registerUniform("u_proj", UNIFORM_MAT4);
 	u_view = registerUniform("u_view", UNIFORM_MAT4);
+#ifdef LIBRW_VISIONOS
+	// Per-view matrices of the multiview twins (header.vert under VC_MULTIVIEW).
+	// Location -1 in mono programs -> flushUniforms skips them; fed from 5.1 on.
+	u_projMV = registerUniform("u_projMV", UNIFORM_MAT4, 2);
+	u_viewMV = registerUniform("u_viewMV", UNIFORM_MAT4, 2);
+#endif
 	u_world = registerUniform("u_world", UNIFORM_MAT4);
 	u_ambLight = registerUniform("u_ambLight", UNIFORM_VEC4);
 	u_lightParams = registerUniform("u_lightParams", UNIFORM_VEC4, MAX_LIGHTS);
@@ -2562,14 +2577,14 @@ initOpenGL(void)
 	const char *fs[] = { shaderDecl, header_frag_src, simple_frag_src, nil };
 	const char *fs_noAT[] = { shaderDecl, "#define NO_ALPHATEST\n", header_frag_src, simple_frag_src, nil };
 
-	defaultShader = Shader::create(vs, fs);
+	defaultShader = Shader::create(vs, fs, "default");
 	assert(defaultShader);
-	defaultShader_noAT = Shader::create(vs, fs_noAT);
+	defaultShader_noAT = Shader::create(vs, fs_noAT, "default_noAT");
 	assert(defaultShader_noAT);
 
-	defaultShader_fullLight = Shader::create(vs_fullLight, fs);
+	defaultShader_fullLight = Shader::create(vs_fullLight, fs, "default_fullLight");
 	assert(defaultShader_fullLight);
-	defaultShader_fullLight_noAT = Shader::create(vs_fullLight, fs_noAT);
+	defaultShader_fullLight_noAT = Shader::create(vs_fullLight, fs_noAT, "default_fullLight_noAT");
 	assert(defaultShader_fullLight_noAT);
 
 	openIm2D();

@@ -45,8 +45,16 @@ layout(std140) uniform Scene
 	mat4 u_view;
 };
 #else
+#ifdef VC_MULTIVIEW
+// visionOS one-pass stereo: one matrix per view, selected by the view id.
+uniform mat4 u_projMV[2];
+uniform mat4 u_viewMV[2];
+#define u_proj u_projMV[gl_ViewID_OVR]
+#define u_view u_viewMV[gl_ViewID_OVR]
+#else
 uniform mat4 u_proj;
 uniform mat4 u_view;
+#endif
 #endif
 
 #define MAX_LIGHTS 8

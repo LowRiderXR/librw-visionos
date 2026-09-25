@@ -252,8 +252,103 @@ linkprogram(GLint vs, GLint fs, GLuint *program)
 	return 0;
 }
 
+static Shader *buildProgram(const char **vsrc, const char **fsrc);
+
+#ifdef LIBRW_VISIONOS
+// ---- Multiview program pairs (multiview-plan.md, 5.0b/1) ----
+// ANGLE validates the view count EXACTLY: a program declaring layout(num_views=2)
+// is only usable on a 2-view FBO and vice versa (validationES.cpp). Every shader
+// that may run in the world pass therefore needs a mono AND a multiview program.
+// The twin is built from the SAME sources with the OVR_multiview2 prelude spliced
+// in directly after the #version line (the #extension directive must precede any
+// non-preprocessor token, and shaderDecl carries 'precision' statements) plus
+// VC_MULTIVIEW, which makes header.vert declare u_projMV[2]/u_viewMV[2] indexed
+// by gl_ViewID_OVR. Nothing selects the twin yet; with VC_MULTIVIEW unset this
+// block is inert and create() behaves exactly as before.
+enum { VC_MV_MAX_PAIRS = 32 };
+static struct { const char *name; int ok; } vcMvPairs[VC_MV_MAX_PAIRS];
+static int vcMvNumPairs = 0;
+static int vcMvMode = -1;	// -1 unknown, 0 off, 1 on, 2 requested but GL_OVR_multiview2 missing
+
+static int
+vcMvPairsMode(void)
+{
+	if(vcMvMode >= 0) return vcMvMode;
+	const char *e = getenv("VC_MULTIVIEW");
+	if(!(e && e[0] == '1')){ vcMvMode = 0; return vcMvMode; }
+	// word-boundary match: "GL_OVR_multiview" is a prefix of "GL_OVR_multiview2"
+	const char *ext = (const char*)glGetString(GL_EXTENSIONS);
+	bool have = false;
+	for(const char *p = ext; p && (p = strstr(p, "GL_OVR_multiview2")) != nil; p += 17){
+		if(p[17] == ' ' || p[17] == '\0'){ have = true; break; }
+	}
+	vcMvMode = have ? 1 : 2;
+	if(!have)
+		fprintf(stderr, "[vc-mv] VC_MULTIVIEW=1 but GL_OVR_multiview2 is not advertised (set KL_GL_MULTIVIEW=1) -- no program pairs built\n");
+	return vcMvMode;
+}
+
+extern "C" int vc_mv_pairs_mode(void) { return vcMvPairsMode(); }
+extern "C" int vc_mv_pair_count(void) { return vcMvNumPairs; }
+extern "C" const char *vc_mv_pair_name(int i) { return (i >= 0 && i < vcMvNumPairs) ? vcMvPairs[i].name : ""; }
+extern "C" int vc_mv_pair_ok(int i) { return (i >= 0 && i < vcMvNumPairs) ? vcMvPairs[i].ok : 0; }
+
+static const char *vcMvPrelude =
+	"#extension GL_OVR_multiview2 : require\n"
+	"layout(num_views = 2) in;\n"
+	"#define VC_MULTIVIEW 1\n";
+
+static Shader*
+buildMultiviewTwin(const char **vsrc, const char **fsrc, const char *name)
+{
+	// vsrc[0] is shaderDecl and starts with the #version line; split it there.
+	const char *decl = vsrc[0];
+	const char *nl = strchr(decl, '\n');
+	if(strncmp(decl, "#version", 8) != 0 || nl == nil){
+		fprintf(stderr, "[vc-mv] pair '%s': vertex source [0] does not start with #version\n", name);
+		return nil;
+	}
+	static char versionLine[64];	// consumed synchronously by buildProgram below
+	size_t n = (size_t)(nl - decl + 1);
+	if(n >= sizeof(versionLine)) n = sizeof(versionLine) - 1;
+	memcpy(versionLine, decl, n);
+	versionLine[n] = '\0';
+	const char *mvsrc[16];
+	int k = 0;
+	mvsrc[k++] = versionLine;
+	mvsrc[k++] = vcMvPrelude;
+	mvsrc[k++] = nl + 1;	// rest of shaderDecl (defines, precision)
+	for(int i = 1; vsrc[i] && k < 15; i++)
+		mvsrc[k++] = vsrc[i];
+	mvsrc[k] = nil;
+	return buildProgram(mvsrc, fsrc);
+}
+#endif
+
 Shader*
-Shader::create(const char **vsrc, const char **fsrc)
+Shader::create(const char **vsrc, const char **fsrc, const char *mvName)
+{
+	Shader *sh = buildProgram(vsrc, fsrc);
+	if(sh == nil)
+		return nil;
+#ifdef LIBRW_VISIONOS
+	if(mvName && vcMvPairsMode() == 1){
+		sh->mv = buildMultiviewTwin(vsrc, fsrc, mvName);
+		if(vcMvNumPairs < VC_MV_MAX_PAIRS){
+			vcMvPairs[vcMvNumPairs].name = mvName;
+			vcMvPairs[vcMvNumPairs].ok = sh->mv != nil;
+			vcMvNumPairs++;
+		}
+		fprintf(stderr, "[vc-mv] pair '%s': %s\n", mvName, sh->mv ? "linked" : "FAILED (compile/link log above)");
+	}
+#else
+	(void)mvName;
+#endif
+	return sh;
+}
+
+static Shader*
+buildProgram(const char **vsrc, const char **fsrc)
 {
 	GLuint vs, fs, program;
 	int i;
@@ -278,6 +373,7 @@ Shader::create(const char **vsrc, const char **fsrc)
 	}
 
 	Shader *sh = rwNewT(Shader, 1, MEMDUR_EVENT | ID_DRIVER);	 // or global?
+	sh->mv = nil;
 
 #ifdef xxxRW_GLES2
 	int numUniforms;
@@ -357,6 +453,10 @@ Shader::use(void)
 void
 Shader::destroy(void)
 {
+	if(this->mv){
+		this->mv->destroy();
+		this->mv = nil;
+	}
 	glDeleteProgram(this->program);
 	rwFree(this->uniformLocations);
 	rwFree(this->serialNums);
