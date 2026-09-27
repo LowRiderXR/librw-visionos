@@ -1578,6 +1578,8 @@ static int   vcEyeViewValid = 0;
 #define g_vcEyeView vcEyeView
 #define g_vcEyeProj vcEyeProj
 #define g_vcEyeViewValid vcEyeViewValid
+static float g_vcEyeViewMV[32];       // one-pass: both eyes' views (diagnostics, vc_get_eye_view_mv)
+static int   g_vcEyeViewMVValid = 0;
 // Stereo sky clear colour (0..1), set per frame from CTimeCycle by main.cpp. Default
 // black = old behaviour (so nothing changes until the reVC side pushes a colour).
 static float g_vcSkyClear[3] = { 0.0f, 0.0f, 0.0f };
@@ -1849,9 +1851,6 @@ vc_stereo_eye_pass(int eye)
 	vc_scene_end(VC_SC_EYCLR);
 	vc_scene_begin(VC_SC_EYMTX);
 
-	float v[16];
-	memcpy(v, vcMainView, sizeof(v));
-
 	// Switches (read once). VC_STEREO_REAL: use the real compositor matrices
 	// (default 1) vs the synthetic +/-0.5 m fallback, for A/B on device.
 	// VC_STEREO_WORLD_SCALE: metres -> game units for the eye offset (GTA/VC is
@@ -1871,57 +1870,72 @@ vc_stereo_eye_pass(int eye)
 	vc_stereo_eye_matrices_t em;
 	bool haveReal = sReal && vc_get_stereo_eye_matrices(&em) && em.valid;
 
-	float p[16];
-	if(haveReal){
-		// Per-eye IPD offset = each eye's view-translation minus their midpoint (so
-		// the absolute room position cancels, leaving only the ~0.03 m half-IPD).
-		// Added to vcMainView, which beginUpdate has ALREADY composed with the head
-		// pose (V_final = M_head · V_game) when head-compose is active -- so the eye
-		// view here is game-camera + head look + this eye's IPD. Only the IPD is added
-		// in this pass; the head rotation comes from vcMainView, the convergence from
-		// the per-eye display-quad projection.
-		int me = eye;
-		simd_float4 tL = em.view[0].columns[3];
-		simd_float4 tR = em.view[1].columns[3];
-		simd_float4 tM = 0.5f * (tL + tR);
-		simd_float4 te = em.view[me].columns[3];
-		v[12] += (te.x - tM.x) * sScale;
-		v[13] += (te.y - tM.y) * sScale;
-		v[14] += (te.z - tM.z) * sScale;
-		setViewMatrix(v);
-
-		// PROJECTION: take FOV + per-eye asymmetry (rows 0/1) from the compositor,
-		// but REBUILD depth (rows 2/3) from the game's near/far in game units,
-		// standard-Z. The compositor projection is REVERSE-Z with near/far in
-		// METRES; using it as-is fights librw's depth buffer (GL_LEQUAL, clear 1)
-		// -- exactly the reverse-Z black-screen trap. So we never upload its depth.
-		if(sKeepProj){
-			memcpy(p, vcMainProj, sizeof(p));
+	// Per-eye VIEW (vcMainView + this eye's half-IPD offset, metres * scale) and
+	// PROJECTION (compositor FOV, symmetric, game-unit standard-Z depth). Shared by
+	// the two-pass path (one eye per call) and the 5.1 one-pass path (both eyes into
+	// the ViewID-indexed arrays). See the comments in the two-pass branch for WHY the
+	// projection is rebuilt (reverse-Z trap, symmetric slices).
+	auto eyeMatrices = [&](int me, float *vo, float *po) {
+		memcpy(vo, vcMainView, 16*sizeof(float));
+		if(haveReal){
+			simd_float4 tL = em.view[0].columns[3];
+			simd_float4 tR = em.view[1].columns[3];
+			simd_float4 tM = 0.5f * (tL + tR);
+			simd_float4 te = em.view[me].columns[3];
+			vo[12] += (te.x - tM.x) * sScale;
+			vo[13] += (te.y - tM.y) * sScale;
+			vo[14] += (te.z - tM.z) * sScale;
+			if(sKeepProj){
+				memcpy(po, vcMainProj, 16*sizeof(float));
+			}else{
+				const float *cp = (const float *)&em.projection[me];  // column-major
+				memset(po, 0, 16*sizeof(float));
+				po[0]  = cp[0];         // FOV x
+				po[5]  = cp[5];         // FOV y
+				float n = vcMainNear, f = vcMainFar, invz = 1.0f / (f - n);
+				po[10] = (f + n) * invz;         // standard-Z (near->-1, far->+1)
+				po[11] = 1.0f;
+				po[14] = -2.0f * n * f * invz;
+				po[15] = 0.0f;
+			}
 		}else{
-			// SYMMETRIC per-eye projection: compositor FOV only, NO off-axis
-			// asymmetry, normal X (no p0 flip). PROVEN on device: the compositor
-			// reprojects colorTextures[i] with its OWN off-axis computeProjection(i),
-			// so it EXPECTS symmetric slices -- baking the asymmetry in doubles it
-			// (divergence). And a p0 X-flip inverts the WHOLE X axis (IPD direction
-			// AND head-turn direction), so ANGLE's per-slice X-flip is instead undone
-			// in the display (uv.x flip), not here. Depth (rows 2/3) REBUILT from the
-			// game near/far, standard-Z: the compositor depth is reverse-Z in metres
-			// and would re-trigger the reverse-Z black screen.
-			const float *cp = (const float *)&em.projection[me];  // column-major
-			memset(p, 0, sizeof(p));
-			p[0]  = cp[0];         // FOV x
-			p[5]  = cp[5];         // FOV y
-			float n = vcMainNear, f = vcMainFar, invz = 1.0f / (f - n);
-			p[10] = (f + n) * invz;         // standard-Z (near->-1, far->+1)
-			p[11] = 1.0f;
-			p[14] = -2.0f * n * f * invz;
-			p[15] = 0.0f;
+			// Fallback (VC_STEREO_REAL=0, or valid=0 in cinema/loading): synthetic
+			// +/-0.5 m offset + game projection. Kept for A/B comparison.
+			vo[12] += (me == 0) ? -0.5f : 0.5f;
+			memcpy(po, vcMainProj, 16*sizeof(float));
 		}
-		// Per-eye upload proof, throttled, eyes 0/1 back-to-back. Row 0 is now
-		// symmetric by design: p0 = +compositor FOV x, p8 = p12 = 0 (the compositor
-		// adds the off-axis itself). view.x-off = the IPD offset actually applied
-		// (opposite per eye); the convergence sign is validated on device.
+	};
+
+	float v[16], p[16];
+	if(vc_multiview_active()){
+		// 5.1 ONE PASS: both eyes' matrices into the ViewID-indexed arrays of the
+		// multiview twins (header.vert: u_viewMV[gl_ViewID_OVR]); the mono uniforms
+		// and the getters carry the CENTRE view + the (symmetric) slice projection for
+		// the CPU readers (game camera, cull, head-forward, CalcScreenCoors).
+		float va[32], pa[32];
+		eyeMatrices(0, &va[0],  &pa[0]);
+		eyeMatrices(1, &va[16], &pa[16]);
+		setUniform(u_viewMV, va);
+		setUniform(u_projMV, pa);
+		memcpy(g_vcEyeViewMV, va, sizeof(va));
+		g_vcEyeViewMVValid = 1;
+		memcpy(v, vcMainView, sizeof(v));
+		memcpy(p, &pa[0], sizeof(p));
+		setViewMatrix(v);
+		setProjectionMatrix(p);
 		{
+			static int sDiagFrame = 0;
+			if(++sDiagFrame % 90 == 0)
+				printf("[vc-eye-mv] UPLOAD arrays: p0=%.4f p5=%.4f  view.x-off eye0=%.4f eye1=%.4f (centre view in mono uniform)\n",
+				       pa[0], pa[5], va[12] - v[12], va[28] - v[12]);
+		}
+	}else{
+		eyeMatrices(eye, v, p);
+		setViewMatrix(v);
+		// Per-eye upload proof, throttled, eyes 0/1 back-to-back. Row 0 is symmetric by
+		// design: p0 = +compositor FOV x, p8 = p12 = 0 (the compositor adds the off-axis
+		// itself). view.x-off = the IPD offset actually applied (opposite per eye).
+		if(haveReal){
 			static int sDiagFrame = 0;
 			if(eye == 0) sDiagFrame++;
 			if(sDiagFrame % 90 == 0){
@@ -1933,25 +1947,28 @@ vc_stereo_eye_pass(int eye)
 			}
 		}
 		setProjectionMatrix(p);
-	}else{
-		// Fallback (VC_STEREO_REAL=0, or valid=0 in cinema/loading): the old
-		// synthetic +/-0.5 m offset + game projection. Kept for A/B comparison.
-		v[12] += (eye == 0) ? -0.5f : 0.5f;
-		setViewMatrix(v);
-		memcpy(p, vcMainProj, sizeof(p));
-		setProjectionMatrix(p);
 	}
 
 	(void)sLogCtr;
 
-	// Stash the eye VIEW (librw convention) this pass uploaded, so the reVC side can
-	// set TheCamera to the same eye camera (fixes CPU-side sky/coronas/lighting that
-	// read TheCamera instead of the GPU uniform). This is the matrix known to render
-	// the world correctly -- the reVC side converts + verifies against it.
+	// Stash the VIEW/PROJECTION this pass uploaded (two-pass: this eye; one-pass:
+	// centre view + slice projection), so the reVC side can set TheCamera to the same
+	// camera (CPU-side sky/coronas/lighting read TheCamera instead of the GPU uniform).
 	memcpy(g_vcEyeView, v, sizeof(v));
 	memcpy(g_vcEyeProj, p, sizeof(p));
 	g_vcEyeViewValid = 1;
 	vc_scene_end(VC_SC_EYMTX);
+}
+
+// One-pass diagnostics: the PER-EYE views the multiview twins render with (librw
+// convention), i.e. what a CPU-projected sprite WOULD need per eye. 0 unless the
+// one-pass render is active.
+extern "C" int
+vc_get_eye_view_mv(int eye, float m[16])
+{
+	if(!g_vcEyeViewMVValid || !vc_multiview_active() || (eye != 0 && eye != 1)) return 0;
+	memcpy(m, &g_vcEyeViewMV[16*eye], 16*sizeof(float));
+	return 1;
 }
 
 // The eye VIEW (librw convention, column-major) that the last vc_stereo_eye_pass
