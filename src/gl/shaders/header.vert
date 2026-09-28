@@ -134,3 +134,13 @@ float DoFog(float w)
 {
 	return clamp((w - u_fogEnd)*u_fogRange, u_fogDisable, 1.0);
 }
+
+// visionOS: fog by RADIAL camera distance instead of view depth (planar fog makes the
+// fog density depend on gaze direction under a wide FOV + head tracking -- far objects
+// vanish straight ahead and reappear at the edge). u_fogMode.x: 0 = stock planar (w),
+// 1 = radial (length of the view-space position). Set once from VC_FOG_RADIAL.
+uniform vec4 u_fogMode;
+float DoFogV(vec4 camVertex, float w)
+{
+	return DoFog(mix(w, length(camVertex.xyz), u_fogMode.x));
+}

@@ -12,5 +12,5 @@ main(void)
 	gl_Position = u_proj * CamVertex;
 	v_color = in_color;
 	v_tex0 = in_tex0;
-	v_fog = DoFog(gl_Position.w);
+	v_fog = DoFogV(CamVertex, gl_Position.w);
 }

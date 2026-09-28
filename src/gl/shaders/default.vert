@@ -19,5 +19,5 @@ main(void)
 	v_color = clamp(v_color, 0.0, 1.0);
 	v_color *= u_matColor;
 
-	v_fog = DoFog(gl_Position.w);
+	v_fog = DoFogV(u_view * Vertex, gl_Position.w);
 }

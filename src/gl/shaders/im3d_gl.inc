@@ -13,6 +13,6 @@ const char *im3d_vert_src =
 "	gl_Position = u_proj * CamVertex;\n"
 "	v_color = in_color;\n"
 "	v_tex0 = in_tex0;\n"
-"	v_fog = DoFog(gl_Position.w);\n"
+"	v_fog = DoFogV(CamVertex, gl_Position.w);\n"
 "}\n"
 ;

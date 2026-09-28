@@ -196,6 +196,9 @@ static UniformObject uniformObject;
 int32 u_alphaRef;
 int32 u_fogData;
 int32 u_fogColor;
+#ifdef LIBRW_VISIONOS
+int32 u_fogMode;   // x: 1 = radial fog (VC_FOG_RADIAL), see header.vert DoFogV
+#endif
 
 // Scene
 int32 u_proj;
@@ -2580,6 +2583,19 @@ initOpenGL(void)
 	u_alphaRef = registerUniform("u_alphaRef", UNIFORM_VEC4);
 	u_fogData = registerUniform("u_fogData", UNIFORM_VEC4);
 	u_fogColor = registerUniform("u_fogColor", UNIFORM_VEC4);
+#ifdef LIBRW_VISIONOS
+	u_fogMode = registerUniform("u_fogMode", UNIFORM_VEC4);
+	{
+		// VC_FOG_RADIAL=1: fog by camera distance instead of view depth. Planar fog under
+		// a ~110 deg per-eye FOV made far buildings vanish when looked at straight on and
+		// reappear at the edge of view (device, rain, 2026-09-28). Default OFF until the
+		// device run confirms; then flip.
+		const char *e = getenv("VC_FOG_RADIAL");
+		float fm[4] = { (e && e[0] == '0') ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };   // default RADIAL
+		setUniform(u_fogMode, fm);
+		printf("[vc-fog] mode = %s (VC_FOG_RADIAL=%s)\n", fm[0] > 0.5f ? "RADIAL (camera distance)" : "PLANAR (view depth, stock)", e ? e : "unset");
+	}
+#endif
 	u_proj = registerUniform("u_proj", UNIFORM_MAT4);
 	u_view = registerUniform("u_view", UNIFORM_MAT4);
 #ifdef LIBRW_VISIONOS

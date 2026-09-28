@@ -28,7 +28,7 @@ const char *matfx_env_vert_src =
 "	v_envColor = max(v_color, u_colorClamp) * u_envColor;\n"
 "	v_color *= u_matColor;\n"
 
-"	v_fog = DoFog(gl_Position.w);\n"
+"	v_fog = DoFogV(u_view * Vertex, gl_Position.w);\n"
 "}\n"
 ;
 const char *matfx_env_frag_src =

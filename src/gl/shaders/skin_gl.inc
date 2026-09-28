@@ -1,8 +1,4 @@
 const char *skin_vert_src =
-// VC_SKINFOG selects the fog depth component: z (original, desktop-correct) or w
-// (view depth, matches default.vert). Default z keeps macOS byte-identical; the
-// visionOS build injects "#define VC_SKINFOG w" (see gl3skin.cpp) because our
-// per-eye rebuilt projection makes clip-Z the wrong fog input -> NPCs tinted to fog.
 "#ifndef VC_SKINFOG\n"
 "#define VC_SKINFOG z\n"
 "#endif\n"
@@ -39,7 +35,7 @@ const char *skin_vert_src =
 "#ifdef VC_SKIN_NOFOG\n"
 "	v_fog = 1.0;\n"
 "#else\n"
-"	v_fog = DoFog(gl_Position.VC_SKINFOG);\n"
+"	v_fog = DoFogV(u_view * Vertex, gl_Position.VC_SKINFOG);   // z original; visionOS injects w (see gl3skin.cpp); radial via u_fogMode\n"
 "#endif\n"
 "}\n"
 ;

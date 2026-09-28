@@ -34,6 +34,6 @@ main(void)
 #ifdef VC_SKIN_NOFOG
 	v_fog = 1.0;
 #else
-	v_fog = DoFog(gl_Position.VC_SKINFOG);   // z original; visionOS injects w (see gl3skin.cpp)
+	v_fog = DoFogV(u_view * Vertex, gl_Position.VC_SKINFOG);   // z original; visionOS injects w (see gl3skin.cpp); radial via u_fogMode
 #endif
 }

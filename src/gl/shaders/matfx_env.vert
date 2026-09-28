@@ -27,5 +27,5 @@ main(void)
 	v_envColor = max(v_color, u_colorClamp) * u_envColor;
 	v_color *= u_matColor;
 
-	v_fog = DoFog(gl_Position.w);
+	v_fog = DoFogV(u_view * Vertex, gl_Position.w);
 }
