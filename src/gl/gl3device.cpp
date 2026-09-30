@@ -2585,6 +2585,7 @@ initOpenGL(void)
 	u_fogColor = registerUniform("u_fogColor", UNIFORM_VEC4);
 #ifdef LIBRW_VISIONOS
 	u_fogMode = registerUniform("u_fogMode", UNIFORM_VEC4);
+	registerUniform("u_im3dPull", UNIFORM_VEC4);   // im3d depth pull (gl3immed.cpp); registered here so all shaders' location tables include it
 	{
 		// VC_FOG_RADIAL=1: fog by camera distance instead of view depth. Planar fog under
 		// a ~110 deg per-eye FOV made far buildings vanish when looked at straight on and

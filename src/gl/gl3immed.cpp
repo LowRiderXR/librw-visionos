@@ -229,15 +229,57 @@ static uint32 im3DVao;
 #endif
 static int32 num3DVertices;	// not actually needed here
 
+// u_im3dPull: view-space depth pull for world-space sprites (see im3d.vert). Uploaded on
+// every im3DTransform; 0 unless the visionOS corona path sets it around its quads.
+static int32 u_im3dPull;
+static float g_im3dPull[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+#ifdef LIBRW_VISIONOS
+extern "C" void vc_im3d_pull(float delta) { g_im3dPull[0] = delta; }
+
+// Device probe (VC_CORONA_DIAG=1): after the uniforms of a pulled im3d draw were flushed,
+// read the value back from the program that is actually bound. Tells whether the pull
+// reaches the shader at all (location, program, value) -- the CPU side looks right.
+static void
+vcIm3dPullProbe(void)
+{
+	static int enabled = -1;
+	if(enabled < 0){
+		const char *e = getenv("VC_CORONA_DIAG");
+		enabled = (e && e[0] == '1') ? 1 : 0;
+	}
+	if(!enabled || g_im3dPull[0] == 0.0f) return;
+	static int counter = 0;
+	if(counter++ % 300 != 0) return;
+	GLint loc = currentShader->uniformLocations[u_im3dPull];
+	float v[4] = { -99.0f, -99.0f, -99.0f, -99.0f };
+	if(loc >= 0) glGetUniformfv(currentShader->program, loc, v);
+	GLint bound = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &bound);
+	const char *which = currentShader == im3dShader ? "mono" :
+		(im3dShader->mv && currentShader == im3dShader->mv) ? "twin" : "OTHER";
+	printf("[vc-im3d] pull probe: shader=%s program=%u bound=%d loc=%d want=%.3f inProgram=%.3f serialSynced=%d glErr=0x%x\n",
+	       which, currentShader->program, bound, loc, g_im3dPull[0], v[0],
+	       currentShader->serialNums[u_im3dPull] == uniformRegistry.uniforms[u_im3dPull].serialNum,
+	       glGetError());
+}
+#endif
+
 void
 openIm3D(void)
 {
+	// registered by the device at init; we just need the id
+	u_im3dPull = registerUniform("u_im3dPull", UNIFORM_VEC4);
 #include "shaders/im3d_gl.inc"
 #include "shaders/simple_fs_gl.inc"
 	const char *vs[] = { shaderDecl, header_vert_src, im3d_vert_src, nil };
 	const char *fs[] = { shaderDecl, header_frag_src, simple_frag_src, nil };
 	im3dShader = Shader::create(vs, fs, "im3d");
 	assert(im3dShader);
+#ifdef LIBRW_VISIONOS
+	printf("[vc-im3d] u_im3dPull id=%d location mono=%d twin=%d\n", u_im3dPull,
+	       im3dShader->uniformLocations[u_im3dPull],
+	       im3dShader->mv ? im3dShader->mv->uniformLocations[u_im3dPull] : -2);
+#endif
 
 	glGenBuffers(1, &im3DIbo);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, im3DIbo);
@@ -276,6 +318,7 @@ im3DTransform(void *vertices, int32 numVertices, Matrix *world, uint32 flags)
 	}
 	setWorldMatrix(world);
 	im3dShader->use();
+	setUniform(u_im3dPull, g_im3dPull);
 
 	if((flags & im3d::VERTEXUV) == 0)
 		SetRenderStatePtr(TEXTURERASTER, nil);
@@ -311,6 +354,9 @@ im3DRenderIndexedPrimitive(PrimitiveType primType, void *indices, int32 numIndic
 	glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, numIndices*2, indices);
 
 	flushCache();
+#ifdef LIBRW_VISIONOS
+	vcIm3dPullProbe();
+#endif
 	vcCountImmDraw();
 	glDrawElements(primTypeMap[primType], numIndices,
 	               GL_UNSIGNED_SHORT, nil);
