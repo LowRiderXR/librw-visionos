@@ -499,7 +499,11 @@ rasterLock(Raster *raster, int32 level, int32 lockMode)
 				GLuint fbo;
 				glGenFramebuffers(1, &fbo);
 				bindFramebuffer(fbo);
-				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, natras->texid, 0);
+				// Attach the level being read, not always 0: raster->width/height were
+				// already halved for `level` above, so reading level 0 here returned the
+				// top-left crop of the base image instead of the mip (ghost windows in a
+				// txd.img written on the device, 2026-10-04).
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, natras->texid, level);
 				GLenum e = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 assert(natras->format == GL_RGBA);
 				glReadPixels(0, 0, raster->width, raster->height, natras->format, natras->type, px);
@@ -598,6 +602,11 @@ rasterUnlock(Raster *raster, int32 level)
 			if(level == 0 && natras->autogenMipmap)
 				glGenerateMipmap(GL_TEXTURE_2D);
 #ifdef LIBRW_VISIONOS
+			// Real data uploaded into a mip level: the chain is no longer "generated".
+			if(level > 0)
+				natras->vcGeneratedMips = false;
+#endif
+#ifdef LIBRW_VISIONOS
 			// VC_MIPMAP Stufe 1: opaque, uncompressed, single-level world textures.
 			// readNativeTexture / image conversion / runtime creates ALL funnel their
 			// texel upload through this unlock, so this one hook covers every path.
@@ -610,6 +619,7 @@ rasterUnlock(Raster *raster, int32 level)
 				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, levels-1);
 				glGenerateMipmap(GL_TEXTURE_2D);
 				natras->numLevels = levels;   // engages the MIP filter path (setRasterStage/setFilterMode)
+				natras->vcGeneratedMips = true;   // writeNativeTexture stores level 0 only
 				int aniso = vcMipmapAniso();
 				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)aniso);
 				natras->maxAnisotropy = aniso;   // sync librw's cache so a later setFilterMode won't reset to 1
@@ -882,6 +892,7 @@ createNativeRaster(void *object, int32 offset, int32)
 	ras->fbo = 0;
 	ras->fboMate = nil;
 	ras->backingStore = nil;
+	ras->vcGeneratedMips = false;
 	return object;
 }
 
@@ -1056,7 +1067,10 @@ writeNativeTexture(Texture *tex, Stream *stream)
 	stream->write8(tex->mask, 32);
 
 	// Raster
-	int32 numLevels = natras->numLevels;
+	// Levels produced by glGenerateMipmap (VC_MIPMAP hook) are not written: only the
+	// uploaded data goes into txd.img, the loader regenerates the chain on upload.
+	// Keep in sync with getSizeNativeTexture.
+	int32 numLevels = natras->vcGeneratedMips ? 1 : natras->numLevels;
 	stream->writeI32(raster->format);
 	stream->writeI32(raster->width);
 	stream->writeI32(raster->height);
@@ -1107,7 +1121,8 @@ uint32
 getSizeNativeTexture(Texture *tex)
 {
 	uint32 size = 12 + 72 + 32;
-	int32 levels = tex->raster->getNumLevels();
+	Gl3Raster *natras = GETGL3RASTEREXT(tex->raster);
+	int32 levels = natras->vcGeneratedMips ? 1 : tex->raster->getNumLevels();
 	for(int32 i = 0; i < levels; i++)
 		size += 4 + getLevelSize(tex->raster, i);
 	return size;

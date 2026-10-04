@@ -265,6 +265,9 @@ struct Gl3Raster
 	uint32 fbo;		// used for camera texture only!
 	Raster *fboMate;	// color or zbuffer raster mate of this one
 	RasterLevels *backingStore;	// if we can't read back GPU memory but have to
+	// visionOS: levels 1..n came from glGenerateMipmap (VC_MIPMAP hook), not from
+	// uploaded data. writeNativeTexture then stores level 0 only; the loader regenerates.
+	bool vcGeneratedMips;
 };
 
 struct Gl3Caps
