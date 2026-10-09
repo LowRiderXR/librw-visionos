@@ -235,6 +235,9 @@ static int32 u_im3dPull;
 static float g_im3dPull[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 #ifdef LIBRW_VISIONOS
 extern "C" void vc_im3d_pull(float delta) { g_im3dPull[0] = delta; }
+// .y: per-corner far clamp in view depth (0 = off); the sun core sets it to 0.98*far so no
+// corner of the pulled quad crosses the far plane (see im3d.vert).
+extern "C" void vc_im3d_pull_clamp(float zmax) { g_im3dPull[1] = zmax; }
 
 // Device probe (VC_CORONA_DIAG=1): after the uniforms of a pulled im3d draw were flushed,
 // read the value back from the program that is actually bound. Tells whether the pull

@@ -9,6 +9,12 @@ VSOUT float v_fog;
 // screen position of every vertex, only the depth changes -- exactly what the 2D sprite
 // path did with z -= nearDist and the sun at 0.95*far, but per eye, so stereo disparity stays
 // that of the true position. 0 (GL default, never set on other platforms) = no change.
+// .y > 0: per-corner far clamp (sun core only). The pulled sun-core quad (0.95*far at the
+// centre, up to 55 m half-size at sunset) is tilted against the eye's view axis, so its
+// outer corners landed beyond far and the clipper cut the glow with a hard straight edge
+// (device screenshots 2026-10-08). Every corner deeper than .y is pulled back along its own
+// view ray to .y: screen shape unchanged, the rest of the quad stays at 0.95*far.
+// View space is left-handed here (depth = +z, see gl3device.cpp: looking into positive Z).
 uniform vec4 u_im3dPull;
 
 void
@@ -17,6 +23,8 @@ main(void)
 	vec4 Vertex = u_world * vec4(in_pos, 1.0);
 	vec4 CamVertex = u_view * Vertex;
 	CamVertex.xyz *= (1.0 + u_im3dPull.x);
+	if(u_im3dPull.y > 0.0 && CamVertex.z > u_im3dPull.y)
+		CamVertex.xyz *= u_im3dPull.y / CamVertex.z;
 	gl_Position = u_proj * CamVertex;
 	v_color = in_color;
 	v_tex0 = in_tex0;
