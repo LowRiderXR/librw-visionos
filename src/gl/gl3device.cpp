@@ -15,6 +15,9 @@
 #include "rwgl3.h"
 #include "rwgl3shader.h"
 #include "rwgl3impl.h"
+#if VC_DIAGNOSTICS
+#include "skel/visionos/vc_diag.h"   // reVC stutter recorder: draw-state first-use probe (flushCache)
+#endif
 
 #define PLUGIN_ID 0
 
@@ -422,6 +425,9 @@ flushGlRenderState(void)
 	if(oldGlState.blendEnable != curGlState.blendEnable){
 		oldGlState.blendEnable = curGlState.blendEnable;
 		(oldGlState.blendEnable ? glEnable : glDisable)(GL_BLEND);
+#if VC_DIAGNOSTICS
+		g_vcDiagComboDirty = 1;   // reVC stutter recorder: draw-state combination changed
+#endif
 	}
 
 	if(oldGlState.srcblend != curGlState.srcblend ||
@@ -429,11 +435,17 @@ flushGlRenderState(void)
 		oldGlState.srcblend = curGlState.srcblend;
 		oldGlState.destblend = curGlState.destblend;
 		glBlendFunc(oldGlState.srcblend, oldGlState.destblend);
+#if VC_DIAGNOSTICS
+		g_vcDiagComboDirty = 1;
+#endif
 	}
 
 	if(oldGlState.depthTest != curGlState.depthTest){
 		oldGlState.depthTest = curGlState.depthTest;
 		(oldGlState.depthTest ? glEnable : glDisable)(GL_DEPTH_TEST);
+#if VC_DIAGNOSTICS
+		g_vcDiagComboDirty = 1;
+#endif
 	}
 #ifdef LIBRW_VISIONOS
 	{
@@ -452,6 +464,9 @@ flushGlRenderState(void)
 	if(oldGlState.depthMask != curGlState.depthMask){
 		oldGlState.depthMask = curGlState.depthMask;
 		glDepthMask(oldGlState.depthMask);
+#if VC_DIAGNOSTICS
+		g_vcDiagComboDirty = 1;
+#endif
 	}
 
 	if(oldGlState.stencilEnable != curGlState.stencilEnable){
@@ -610,6 +625,9 @@ bindFramebuffer(uint32 fbo)
 	if(currentFramebuffer != fbo){
 		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 		currentFramebuffer = fbo;
+#if VC_DIAGNOSTICS
+		g_vcDiagComboDirty = 1;   // render target is part of the draw-state combination key
+#endif
 	}
 #ifdef LIBRW_VISIONOS
 	// 5.0b/2: program selection follows the binding (see Shader::use).
@@ -1397,6 +1415,27 @@ flushCache(void)
 	}
 #endif
 	flushUniforms();
+
+#if VC_DIAGNOSTICS
+	// reVC stutter recorder, first-use probe: every draw passes here; the key is rebuilt
+	// only after a component changed (flag set by Shader::use, bindFramebuffer, the GL
+	// state branches above and setAttribPointers). The combination mirrors what ANGLE's
+	// Metal backend specialises a render pipeline on: program (the multiview twin is a
+	// different program), blend state, depth state, render target (formats / sample
+	// count), multiview binding and the enabled vertex-attribute set.
+	if(g_vcDiagComboDirty){
+		g_vcDiagComboDirty = 0;
+		if(vc_diag_on()){
+			uint64_t stateWord = (uint64_t)(curGlState.srcblend & 0x3FF) | ((uint64_t)(curGlState.destblend & 0x3FF) << 10)
+			                   | ((uint64_t)(curGlState.blendEnable ? 1 : 0) << 20) | ((uint64_t)(curGlState.depthTest ? 1 : 0) << 21)
+			                   | ((uint64_t)(curGlState.depthMask ? 1 : 0) << 22) | ((uint64_t)(curGlState.depthFunc & 0xF) << 23)
+			                   | ((uint64_t)(vcMultiviewBound ? 1 : 0) << 27);
+			uint64_t h1 = ((uint64_t)(currentShader ? currentShader->program : 0) << 32) | stateWord;
+			uint64_t h2 = ((uint64_t)currentFramebuffer << 32) | (uint64_t)g_vcDiagAttribMask;
+			vc_diag_combo(h1 * 0x9E3779B97F4A7C15ull ^ (h2 + 0x632BE59BD9B4E019ull) * 0xC2B2AE3D27D4EB4Full);
+		}
+	}
+#endif
 }
 
 static void

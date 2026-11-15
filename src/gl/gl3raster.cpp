@@ -13,6 +13,9 @@
 #include "rwgl3.h"
 #include "rwgl3shader.h"
 #include "rwgl3impl.h"
+#if VC_DIAGNOSTICS
+#include "skel/visionos/vc_diag.h"   // reVC stutter recorder: texel-upload count/bytes/duration (Diagnostics build only)
+#endif
 
 #define PLUGIN_ID ID_DRIVER
 
@@ -583,6 +586,11 @@ rasterUnlock(Raster *raster, int32 level)
 	case Raster::CAMERATEXTURE:
 		if(raster->privateFlags & Raster::LOCKWRITE){
 			uint32 prev = bindTexture(natras->texid);
+#if VC_DIAGNOSTICS
+			uint64_t vcDiagT0 = VC_DIAG_NOW();
+			uint64_t vcDiagBytes = natras->isCompressed ? (uint64_t)getLevelSize(raster, level)
+			                                            : (uint64_t)raster->stride * (uint64_t)raster->height;
+#endif
 			if(natras->isCompressed){
 				glCompressedTexImage2D(GL_TEXTURE_2D, level, natras->internalFormat,
 					raster->width, raster->height, 0,
@@ -599,6 +607,13 @@ rasterUnlock(Raster *raster, int32 level)
 					     raster->width, raster->height,
 					     0, natras->format, natras->type, raster->pixels);
 			}
+#if VC_DIAGNOSTICS
+			if(vcDiagT0){
+				vc_diag_count(VC_DIAG_C_TEX_UPLOADS, 1);
+				vc_diag_count(VC_DIAG_C_TEX_BYTES, vcDiagBytes);
+				vc_diag_max(VC_DIAG_M_TEX_UPLOAD, mach_absolute_time() - vcDiagT0);
+			}
+#endif
 			if(level == 0 && natras->autogenMipmap)
 				glGenerateMipmap(GL_TEXTURE_2D);
 #ifdef LIBRW_VISIONOS

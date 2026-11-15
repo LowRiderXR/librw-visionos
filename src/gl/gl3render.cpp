@@ -11,6 +11,9 @@
 #include "../rwobjects.h"
 #ifdef RW_OPENGL
 #include "rwgl3.h"
+#if VC_DIAGNOSTICS
+#include "skel/visionos/vc_diag.h"   // reVC stutter recorder: enabled-attribute mask for the first-use probe
+#endif
 #include "rwgl3shader.h"
 
 #include "rwgl3impl.h"
@@ -122,11 +125,20 @@ void
 setAttribPointers(AttribDesc *attribDescs, int32 numAttribs)
 {
 	AttribDesc *a;
+#if VC_DIAGNOSTICS
+	unsigned vcDiagMask = 0;   // reVC stutter recorder: the enabled-attribute set shapes ANGLE's vertex descriptor
+#endif
 	for(a = attribDescs; a != &attribDescs[numAttribs]; a++){
 		glEnableVertexAttribArray(a->index);
 		glVertexAttribPointer(a->index, a->size, a->type, a->normalized,
 		                      a->stride, (void*)(uint64)a->offset);
+#if VC_DIAGNOSTICS
+		vcDiagMask |= 1u << (a->index & 31);
+#endif
 	}
+#if VC_DIAGNOSTICS
+	if(vcDiagMask != g_vcDiagAttribMask){ g_vcDiagAttribMask = vcDiagMask; g_vcDiagComboDirty = 1; }
+#endif
 }
 
 void

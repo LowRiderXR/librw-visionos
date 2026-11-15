@@ -12,6 +12,9 @@
 #ifdef RW_OPENGL
 #include "rwgl3.h"
 #include "rwgl3shader.h"
+#if VC_DIAGNOSTICS
+#include "skel/visionos/vc_diag.h"   // reVC stutter recorder: glLinkProgram count/duration (Diagnostics build only)
+#endif
 
 #ifdef LIBRW_VISIONOS
 // GL entry points that actually fire per draw -- each one is a validated call through
@@ -247,8 +250,20 @@ linkprogram(GLint vs, GLint fs, GLuint *program)
 
 	glAttachShader(prog, vs);
 	glAttachShader(prog, fs);
+#if VC_DIAGNOSTICS
+	// reVC stutter recorder: link count + duration. ANGLE runs the link (GLSL -> MSL and
+	// the Metal library compile) as a deferred task that glLinkProgram only STARTS; the
+	// GL_LINK_STATUS query below resolves it, so the timer must span both calls.
+	uint64_t vcDiagT0 = VC_DIAG_NOW();
+#endif
 	glLinkProgram(prog);
 	glGetProgramiv(prog, GL_LINK_STATUS, &success);
+#if VC_DIAGNOSTICS
+	if(vcDiagT0){
+		vc_diag_count(VC_DIAG_C_GL_LINKS, 1);
+		vc_diag_max(VC_DIAG_M_GL_LINK, mach_absolute_time() - vcDiagT0);
+	}
+#endif
 	if(!success){
 		fprintf(stderr, "Error in program\n");
 		glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &len);
@@ -463,6 +478,9 @@ Shader::use(void)
 		g_vcShaderSwitch++;
 		glUseProgram(target->program);
 		currentShader = target;
+#if VC_DIAGNOSTICS
+		g_vcDiagComboDirty = 1;   // program is part of the draw-state combination key
+#endif
 	}
 #else
 	if(currentShader != this){
