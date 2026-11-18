@@ -1965,29 +1965,9 @@ vc_stereo_eye_pass(int eye)
 		memcpy(p, &pa[0], sizeof(p));
 		setViewMatrix(v);
 		setProjectionMatrix(p);
-		{
-			static int sDiagFrame = 0;
-			if(++sDiagFrame % 90 == 0)
-				printf("[vc-eye-mv] UPLOAD arrays: p0=%.4f p5=%.4f  view.x-off eye0=%.4f eye1=%.4f (centre view in mono uniform)\n",
-				       pa[0], pa[5], va[12] - v[12], va[28] - v[12]);
-		}
 	}else{
 		eyeMatrices(eye, v, p);
 		setViewMatrix(v);
-		// Per-eye upload proof, throttled, eyes 0/1 back-to-back. Row 0 is symmetric by
-		// design: p0 = +compositor FOV x, p8 = p12 = 0 (the compositor adds the off-axis
-		// itself). view.x-off = the IPD offset actually applied (opposite per eye).
-		if(haveReal){
-			static int sDiagFrame = 0;
-			if(eye == 0) sDiagFrame++;
-			if(sDiagFrame % 90 == 0){
-				simd_float4 te = em.view[eye].columns[3];
-				simd_float4 tM = 0.5f*(em.view[0].columns[3] + em.view[1].columns[3]);
-				const float *cp = (const float *)&em.projection[eye];
-				printf("[vc-eye%d] UPLOAD row0=[p0=%.4f p8=%.4f p12=%.4f]  view.x-off=%.4f  raw cp[p0=%.4f p8=%.4f]\n",
-				       eye, p[0], p[8], p[12], te.x - tM.x, cp[0], cp[8]);
-			}
-		}
 		setProjectionMatrix(p);
 	}
 
